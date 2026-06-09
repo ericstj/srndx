@@ -1,0 +1,23 @@
+# Build output
+bin/
+obj/
+
+# Local-only NuGet feed override (used while Hnsw.Net 0.1.2 is unreleased)
+nuget.config.local
+
+# Generated index files
+*.index
+*.idx
+
+# Downloaded model files (fetched at build time)
+models/
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.user
+
+# OS
+Thumbs.db
+.DS_Store
