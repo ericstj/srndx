@@ -251,6 +251,51 @@ public sealed class SearchIndex : IDisposable
         Task.WaitAll(vectorTask, lexicalTask);
     }
 
+    /// <summary>
+    /// Loads an index from a file, memory-mapping the vector index instead of reading it into memory.
+    /// This is the read-only cold-start path: record payloads and vectors are faulted in on demand, so
+    /// startup cost is independent of index size. When <paramref name="tracking" /> is set the index will
+    /// be mutated (watch/serve), which a memory-mapped index cannot support, so it falls back to a
+    /// fully-materialized load.
+    /// </summary>
+    public void Load(string path, bool tracking = false)
+    {
+        ArgumentNullException.ThrowIfNull(path);
+
+        if (tracking)
+        {
+            using FileStream mutable = File.OpenRead(path);
+            Load(mutable, tracking);
+            return;
+        }
+
+        long vectorOffset;
+        long vectorLength;
+        using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+        using (var reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: true))
+        {
+            if (reader.ReadUInt32() != IndexMagic)
+            {
+                throw new InvalidDataException("Unrecognized index format. Rebuild the index with 'ssearch index'.");
+            }
+
+            vectorLength = reader.ReadInt64();
+            vectorOffset = stream.Position;
+        }
+
+        long lexicalOffset = vectorOffset + vectorLength;
+
+        Task vectorTask = Task.Run(() => Collection.Load(path, vectorOffset, SearchSerializerContext.Default));
+        Task lexicalTask = Task.Run(() =>
+        {
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            stream.Seek(lexicalOffset, SeekOrigin.Begin);
+            using var lexReader = new BinaryReader(stream, Encoding.UTF8);
+            _lexical.Load(lexReader, tracking);
+        });
+        Task.WaitAll(vectorTask, lexicalTask);
+    }
+
     private static VectorSearchOptions<SearchRecord>? BuildFilter(string? language, string? source)
     {
         if (language is not null && source is not null)

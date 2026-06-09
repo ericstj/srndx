@@ -281,10 +281,7 @@ static async Task<int> RunSearchAsync(string query, string indexPath, string? la
 
     Console.OutputEncoding = System.Text.Encoding.UTF8;
     using var index = new SearchIndex();
-    using (FileStream stream = File.OpenRead(indexPath))
-    {
-        index.Load(stream);
-    }
+    index.Load(indexPath);
 
     IReadOnlyList<(SearchRecord Record, float Score)> results =
         await index.SearchAsync(query, top, language, source);
