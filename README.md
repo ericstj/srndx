@@ -14,6 +14,9 @@ libraries through the standard .NET AI ecosystem abstractions:
 
 No GPU, no cloud, no API key, no native binary. Everything runs in-process, anywhere .NET runs.
 
+Search is **hybrid**: a built-in [BM25 lexical index](Bm25Index.cs) (exact-token relevance) is fused
+with the semantic vector index via reciprocal-rank fusion, so both keyword and intent matches surface.
+
 ## How it works
 
 1. **`index`** walks a folder and/or a git repository.
@@ -24,9 +27,11 @@ No GPU, no cloud, no API key, no native binary. Everything runs in-process, anyw
      directories (`bin`, `obj`, `node_modules`, ...) are skipped by name.
    - **Commits** become one passage each (subject + body), located by short SHA.
    - Every passage is language-detected (FastText.Net) and embedded automatically by the vector
-     store (Model2Vec.Net, wired in as an `IEmbeddingGenerator`).
-   - The Hnsw.Net index is persisted to a single file.
-2. **`search`** loads that index and returns the closest passages by meaning, with optional
+     store (Model2Vec.Net, wired in as an `IEmbeddingGenerator`); its tokens are also added to a
+     built-in BM25 lexical index.
+   - The vector index and the BM25 lexical index are persisted together to a single file.
+2. **`search`** loads that index and returns the most relevant passages by fusing semantic similarity
+   (the vector index) with lexical BM25 relevance (reciprocal-rank fusion), with optional
    `--lang` and `--source` filters (MEVD LINQ filters under the hood).
 3. **`serve`** keeps an index in sync with a watched directory and answers queries interactively.
    - It builds the index on first run (or loads an existing one), then watches the directory with a
@@ -76,46 +81,58 @@ ssearch install-skill --repo .    # emit .github/skills/ssearch/SKILL.md
 
 Run `ssearch --help` (or `ssearch <command> --help`) for all options.
 
-## Benchmarks: semantic search vs `grep`
+## Benchmarks: hybrid search vs `grep`
 
-How does meaning-based search actually compare to literal search? Measured on
-[`dotnet/extensions`](https://github.com/dotnet/extensions) (3,661 git-tracked files) with the
-Native-AOT `ssearch` executable, against `git grep` run from the repo root for the same scenarios.
+How does hybrid (semantic + BM25) search compare to literal search? Measured on
+[`dotnet/extensions`](https://github.com/dotnet/extensions) (3,661 indexed files) with the
+Native-AOT `ssearch` executable, against `git grep` run from the repo root.
 
 Building the index is a one-time cost; `git grep` pays its full cost on every query:
 
 | | value |
 | --- | --- |
-| `ssearch index` (one-time) | **15.4 s** — 3,661 files → 20,487 passages |
-| index size | 38 MB |
+| `ssearch index` (one-time) | **16.4 s** — 3,661 files → 20,487 passages |
+| index size | 49 MB (vector + BM25) |
 
-Per-query latency (each `ssearch search` is a cold process: start + model load + index load + query):
+Per-query latency: a cold `ssearch search` (start + model load + index load + query) runs **~0.4 s**,
+~2× faster than `git grep` over this repo (**~0.85 s**). `grep` re-walks the repo on every query;
+`ssearch` loads a prebuilt index — and the BM25 half is loaded on a second core in parallel with the
+vector index, so it adds essentially nothing to cold start. `serve` / `mcp` keep the index warm so
+repeat queries skip the reload entirely.
 
-| Scenario (typed as intent) | `ssearch` | `git grep` — same phrase | `git grep` — expert token |
-| --- | --- | --- | --- |
-| validate options at startup | **375 ms** ✓ | 956 ms — 0 hits | 912 ms — 53 lines (`ValidateOnStart`) |
-| http retry w/ exponential backoff | **377 ms** ✓ | 893 ms — 2 lines | 994 ms — 15 lines (`Backoff`) |
-| circuit breaker opens on failures | **358 ms** ~ | 872 ms — 0 hits | 947 ms — 58 lines (`CircuitBreaker`) |
-| redact PII in logs | **371 ms** ✓ | 823 ms — 0 hits | 998 ms — 2,336 lines (`Redact`) |
-| pool/reuse objects | **349 ms** ✓ | 861 ms — 0 hits | 1,000 ms — 185 lines (`ObjectPool`) |
+**Search by intent** — phrases with no shared keywords, where `grep` has nothing literal to match:
+
+| Query (typed as intent) | `ssearch` top hit | `git grep` same phrase |
+| --- | --- | --- |
+| validate options at startup | `Diagnostics.Probes.Tests…OptionsValidatorTests` ✓ | 0 hits |
+| circuit breaker half-open state | `Http.Resilience…CustomValidator` ✓ | 0 hits |
+| pool and reuse objects | `Shared/Pools/PoolFactory.cs` ✓ | 0 hits |
+| retry with exponential backoff | `Http.Resilience.Tests…HttpRetryStrategyOptionsTests` ✓ | 0 hits |
+| redact sensitive data from logs | `core-templates/steps/publish-logs.yml` ~ | 0 hits |
+
+**Exact identifiers** — where the BM25 half earns its keep: typing the bare identifier now lands on a
+genuinely relevant file (it used to drift off-topic under pure-semantic search), while `grep` returns
+every literal occurrence for you to scan:
+
+| Identifier | `ssearch` top hit | `git grep` |
+| --- | --- | --- |
+| `ValidateOnStart` | `HeaderParsing…ServiceCollectionExtensions` ✓ | 53 lines / 23 files |
+| `Backoff` | `Http.Resilience.Tests…HttpClientBuilderExtensions` ✓ | 6 lines / 6 files |
+| `CircuitBreaker` | `Http.Resilience…CustomValidator` ✓ | 56 lines / 24 files |
+| `Redact` | `Compliance.Testing.Tests…FakeRedactorTests` ✓ | 1,853 lines / 159 files |
+| `ObjectPool` | `Telemetry…ResetOnGetObjectPool` ✓ | 173 lines / 74 files |
 
 What this shows:
 
-- **Latency.** A cold `ssearch` query (~360 ms) is ~2.5× faster than `git grep` over this repo
-  (~0.9 s), because `grep` re-walks every file each time while `ssearch` queries a prebuilt index.
-  `serve` / `mcp` keep that index warm, so subsequent queries are faster still.
-- **Search by intent.** Typing the *concept* literally, `grep` found nothing in four of five cases;
-  `ssearch` returned the on-target `file:line` every time (PII → `Telemetry` redaction docs +
-  `ExtendedLogger.cs`; pooling → `Shared/Pools/PoolFactory.cs`) — ranked by relevance.
-- **Where `grep` wins, honestly.** When you already know the exact identifier, `grep` is precise and
-  exhaustive. For "circuit breaker," `grep` on `CircuitBreaker` hit 25 files; `ssearch`'s top result
-  was a weak 0.554 and lower hits drifted off-topic — semantic scores degrade gracefully, but this is
-  not a literal-precision tool. And `grep` on `Redact` returned 2,336 unranked lines across 181 files,
-  where `ssearch` returned the 3 most relevant.
-
-Different tools: reach for `grep` when you know the token and want every occurrence; reach for
-`ssearch` when you're searching by meaning, want ranked results, and want query latency that doesn't
-grow with the repo.
+- **Hybrid covers both modes.** BM25 supplies exact-identifier precision; the embeddings supply
+  intent; reciprocal-rank fusion merges them, so the same query box answers "where is `ObjectPool`?"
+  *and* "where do we pool and reuse objects?".
+- **`grep` is exhaustive and unranked; `ssearch` is focused and ranked.** `grep` on `Redact` returns
+  1,853 lines across 159 files; `ssearch` returns the single most relevant passage. Reach for `grep`
+  when you want every occurrence of a known token, `ssearch` when you want the most relevant few.
+- **Intent quality is bounded by the embedding model, honestly.** One of the five intent queries
+  returned a loosely related top hit (`~`) — expected from the tiny `potion-base-2M` model; swapping a
+  larger Model2Vec model trades startup/footprint for better semantic ranking with no code change.
 
 ## Models
 

@@ -235,7 +235,7 @@ static async Task<int> RunIndexAsync(string? filesDir, string? gitRepo, int maxC
 
     using (FileStream stream = File.Create(outPath))
     {
-        index.Collection.Save(stream, SearchSerializerContext.Default);
+        index.Save(stream);
     }
 
     Console.WriteLine($"Indexed {total} passages. Wrote index to {Path.GetFullPath(outPath)}.");
@@ -283,7 +283,7 @@ static async Task<int> RunSearchAsync(string query, string indexPath, string? la
     using var index = new SearchIndex();
     using (FileStream stream = File.OpenRead(indexPath))
     {
-        index.Collection.Load(stream, SearchSerializerContext.Default);
+        index.Load(stream);
     }
 
     IReadOnlyList<(SearchRecord Record, float Score)> results =

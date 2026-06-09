@@ -63,7 +63,7 @@ public sealed class IndexService
             _log.WriteLine($"Loading index {_indexPath} ...");
             using (FileStream stream = File.OpenRead(_indexPath))
             {
-                _index.Collection.Load(stream, SearchSerializerContext.Default);
+                _index.Load(stream, tracking: true);
             }
 
             await RebuildFileMapAsync().ConfigureAwait(false);
@@ -355,7 +355,7 @@ public sealed class IndexService
             string temp = _indexPath + ".tmp";
             using (FileStream stream = File.Create(temp))
             {
-                _index.Collection.Save(stream, SearchSerializerContext.Default);
+                _index.Save(stream);
             }
 
             File.Move(temp, _indexPath, overwrite: true);
