@@ -23,36 +23,41 @@ NuGet feed** as a [RID-specific .NET tool](https://learn.microsoft.com/dotnet/co
 native-AOT packages for common platforms plus a portable fallback. The CLI picks the best match for your
 machine, and the ML models are bundled in, so the tool is self-contained.
 
-The feed is private, so installing needs a credential with the `read:packages` scope. The cleanest way
-is to borrow the [GitHub CLI](https://cli.github.com)'s own token — no personal access token to create
-or store. Grant `gh` the scope once, then add the feed only for the install and remove it after, so no
-credential lingers in your NuGet config:
+The feed is private, so installing needs a credential with the `read:packages` scope. Register the feed
+by name **without** a password, then pass the token only through the environment at install time — so it
+never lands in `nuget.config`. The token is borrowed from the [GitHub CLI](https://cli.github.com), so
+there's no personal access token to create:
 
 ```sh
-# One-time: let your gh login read packages (opens a browser to grant the scope)
-gh auth refresh -h github.com -s read:packages
+# One-time setup
+gh auth refresh -h github.com -s read:packages                                        # let gh read packages
+dotnet nuget add source https://nuget.pkg.github.com/ericstj/index.json --name srndx   # URL only — no secret on disk
 
-# Add the feed with gh's token, install, then drop the source again
-dotnet nuget add source https://nuget.pkg.github.com/ericstj/index.json \
-  --name srndx-github \
-  --username "$(gh api user --jq .login)" \
-  --password "$(gh auth token)" \
-  --store-password-in-clear-text
-dotnet tool install -g dotnet-srndx
-dotnet nuget remove source srndx-github
+# Install — the token lives only in the environment variable, scoped to this one command
+NuGetPackageSourceCredentials_srndx="Username=$(gh api user --jq .login);Password=$(gh auth token)" \
+  dotnet tool install -g dotnet-srndx
 
 srndx --help
 ```
 
-In PowerShell, substitute the command expansions: `--username (gh api user --jq .login) --password (gh auth token)`.
+In PowerShell, set the variable then run the install:
 
-New versions are published by CI when a `v*` tag is pushed. Upgrade by re-running the three feed steps
-above with `dotnet tool update -g dotnet-srndx` in place of `install`.
+```powershell
+$env:NuGetPackageSourceCredentials_srndx = "Username=$(gh api user --jq .login);Password=$(gh auth token)"
+dotnet tool install -g dotnet-srndx
+$env:NuGetPackageSourceCredentials_srndx = $null
+```
 
-> `gh` cannot mint a separate throwaway PAT — GitHub no longer exposes a token-creation API — so this
-> reuses `gh`'s existing managed session token (revoke it any time with `gh auth logout`). If you'd
-> rather use your own token, create a [personal access token](https://github.com/settings/tokens) with
-> `read:packages` and pass it as `--password` instead.
+New versions are published by CI when a `v*` tag is pushed; upgrade with the same credential line in front
+of `dotnet tool update -g dotnet-srndx`.
+
+> `dotnet tool install` has no flag for feed credentials, so NuGet reads them from the
+> `NuGetPackageSourceCredentials_<source-name>` environment variable, matched to the source by name —
+> keeping the token out of `nuget.config` entirely. This reuses `gh`'s managed session token (revoke any
+> time with `gh auth logout`); `gh` can't mint a throwaway PAT because GitHub no longer exposes a
+> token-creation API. To use your own token instead, create a
+> [personal access token](https://github.com/settings/tokens) with `read:packages` and put it in the
+> `Password=` field.
 
 ## Usage
 
