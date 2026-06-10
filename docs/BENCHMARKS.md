@@ -29,9 +29,9 @@ match. Different contracts — see the takeaways.
 | **srndx (8 shards)** | **154.6 s** | 1449 MB |
 
 `srndx` builds a richer index — dense embeddings for every passage plus a BM25 lexical index — so it is
-larger and slower to build than a keyword-only index. Sharding cut that build from ~491 s to ~155 s
-(see the sharding section in the [README](../README.md)); it is still a one-time cost amortized over every
-later query. The plain greps have no build step.
+larger and slower to build than a keyword-only index. Sharding the vector index cut that build from
+~491 s to ~155 s (see [Sharded indexing](#sharded-indexing) below); it is still a one-time cost
+amortized over every later query. The plain greps have no build step.
 
 ## Literal identifiers
 
@@ -71,8 +71,8 @@ results returned, across four intent queries (e.g. *"cancel an async operation w
 
 Every literal tool — including the fast indexed one — returns **nothing**, because none of the query
 words appear in the relevant code. `srndx` is the only tool that answers these queries at all, returning
-5 ranked passages in ~80 ms warm. (For an example of the passages `srndx` surfaces for intent queries,
-see the qualitative table in the [README](../README.md).)
+5 ranked passages in ~80 ms warm. For examples of the passages `srndx` surfaces for intent queries, see
+[Hybrid search quality](#hybrid-search-quality) below.
 
 ## Takeaways
 
@@ -89,6 +89,56 @@ see the qualitative table in the [README](../README.md).)
   files); `srndx` returns the few most relevant passages, ranked. Reach for `grep` when you want *every*
   occurrence of a known token; reach for `srndx` when you want the most relevant few — by keyword **or**
   by meaning.
+
+## Sharded indexing
+
+The vector index is split into independent HNSW shards (`--shards`, default 8) built, loaded, and
+searched in parallel. On the same `dotnet/runtime` corpus, single-graph (`--shards 1`) vs the default
+8 shards on the same machine:
+
+| | `--shards 1` | `--shards 8` | change |
+| --- | ---: | ---: | ---: |
+| `srndx index` build | 490.9 s | 148.0 s | **3.3× faster** |
+| cold one-shot `search` (load + query) | 2.25 s | 1.41 s | **1.6× faster** |
+| index size | 1449 MB | 1449 MB | same |
+
+Sharding speeds the build (smaller graphs parallelize *and* have cheaper per-insert cost), the
+cold-start load (each shard is a memory-mapped segment, mapped on its own core), and the query (shards
+are searched concurrently, then merged). **Recall is preserved**: top-10 results overlap the
+single-graph index ~92%, within the ~94% overlap two independent single-graph rebuilds already have —
+the drift is ordinary approximate-nearest-neighbor nondeterminism, not a sharding penalty, and a
+synthetic ground-truth check confirms sharded recall is at least as high as the single graph.
+
+## Hybrid search quality
+
+Hybrid (semantic + BM25) ranking on [`dotnet/extensions`](https://github.com/dotnet/extensions)
+(3,661 files → 20,487 passages). The point of these tables is *what* surfaces, not latency.
+
+**By intent** — phrases with no shared keyword, where `grep` has nothing literal to match:
+
+| Query (typed as intent) | `srndx` top hit | `git grep` |
+| --- | --- | --- |
+| validate options at startup | `Diagnostics.Probes.Tests…OptionsValidatorTests` ✓ | 0 hits |
+| circuit breaker half-open state | `Http.Resilience…CustomValidator` ✓ | 0 hits |
+| pool and reuse objects | `Shared/Pools/PoolFactory.cs` ✓ | 0 hits |
+| retry with exponential backoff | `Http.Resilience.Tests…HttpRetryStrategyOptionsTests` ✓ | 0 hits |
+| redact sensitive data from logs | `core-templates/steps/publish-logs.yml` ~ | 0 hits |
+
+**By exact identifier** — where the BM25 half earns its keep: the bare token lands on a genuinely
+relevant file, while `grep` returns every literal occurrence to scan:
+
+| Identifier | `srndx` top hit | `git grep` |
+| --- | --- | --- |
+| `ValidateOnStart` | `HeaderParsing…ServiceCollectionExtensions` ✓ | 53 lines / 23 files |
+| `Backoff` | `Http.Resilience.Tests…HttpClientBuilderExtensions` ✓ | 6 lines / 6 files |
+| `CircuitBreaker` | `Http.Resilience…CustomValidator` ✓ | 56 lines / 24 files |
+| `Redact` | `Compliance.Testing.Tests…FakeRedactorTests` ✓ | 1,853 lines / 159 files |
+| `ObjectPool` | `Telemetry…ResetOnGetObjectPool` ✓ | 173 lines / 74 files |
+
+Reciprocal-rank fusion merges the two signals, so the same query box answers "where is `ObjectPool`?"
+*and* "where do we pool and reuse objects?". Intent quality is bounded by the embedding model: one
+intent query above returned a loosely related hit (`~`), expected from the tiny `potion-base-2M` model
+— a larger Model2Vec model trades startup/footprint for better ranking with no code change.
 
 _Raw data: `report-build.csv`, `report-latency.csv` (median + min per tool/query, with hit counts),
 produced by `bench-report.ps1`._
