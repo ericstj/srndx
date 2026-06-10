@@ -120,3 +120,41 @@ package (`dotnet pack`) that ties `dotnet tool install dotnet-srndx` to the righ
 The ML models are bundled into each package, so the installed tool is self-contained. CI builds every
 package on its matching OS on each push, and on a version tag (`v*`) publishes the set to the
 repository's private GitHub Packages feed.
+
+## Limitations and scope
+
+`srndx` is a **retrieval** tool: it returns the most relevant *passages* by meaning and keyword. It does
+not parse code into an AST, resolve symbols, or build a call/inheritance graph. That shapes what it is
+and isn't good at — worth knowing before reaching for it.
+
+Where it does well:
+
+- **Intent / "how do I…" queries** — the semantic half finds passages that mean the same thing even with
+  no shared keywords.
+- **Distinctive or namespace-qualified names** — `HttpClient`, `System.Text.Json.JsonSerializer`,
+  `TimeOnly` reliably surface the defining file (the path index favors a short, exact path/name match).
+- **Concepts with a canonical home** — e.g. a query about garbage collection lands on the GC design doc;
+  "thread pool work stealing" lands on `ThreadPoolWorkQueue.cs`.
+
+Known weak spots:
+
+- **Common single-word type names** (e.g. `List`, `Dictionary`). The token is so frequent — and the same
+  name is reused across the BCL, tests, native code, and third-party sources (e.g. a compression
+  "dictionary") — that the canonical definition is often not even retrieved. Picking *which* same-named
+  file is meant requires knowing it's a type, which needs symbol/structure information `srndx` doesn't
+  have. (Lexical re-ranking and a file-name boost were tried and don't reliably help: weighting the name
+  match high enough to win promotes the *wrong* same-named file, and weighting it low leaves it neutral.)
+- **Purely conceptual queries with no keyword anchor** (e.g. "how is async/await implemented", "string
+  interning"). Ranking quality here is bounded by the embedding model; the bundled `potion-base-2M` is
+  tiny. A larger Model2Vec model (see [Bring your own model](../README.md#bring-your-own-model)) improves
+  these directly, at the cost of startup and footprint.
+- **Keyword collisions across layers** — e.g. a P/Invoke query can land on a same-named native
+  (`corehost`) symbol rather than the managed declaration, because `srndx` ranks text, not call sites.
+
+In short: `srndx` answers "find passages about X" or "where is the type named X", not "where is symbol X
+*defined*, what *references* it, or what *derives* from it". Precise symbol navigation — definitions,
+references, inheritance, call chains, disambiguating same-named symbols — is the job of a language-aware
+code-intelligence tool (an AST / symbol-graph indexer, or your editor's go-to-definition). The two are
+complementary: use `srndx` to find the relevant region by meaning, and a symbol tool to resolve exact
+structure. `srndx` deliberately stays in the lightweight, language-agnostic, no-native-dependency lane
+rather than reimplementing that heavier machinery.
