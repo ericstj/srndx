@@ -37,7 +37,24 @@ XML
 # Token lives only in this environment variable, matched to the "srndx" source by name.
 export NuGetPackageSourceCredentials_srndx="Username=$(gh api user --jq .login);Password=$(gh auth token)"
 
-# `dotnet tool update` installs when the tool is absent and upgrades when it is present.
-dotnet tool update -g dotnet-srndx --prerelease --configfile "$cfg"
+# `dotnet tool update` installs when the tool is absent and upgrades when it is present. The platform
+# package bundles the ML models (~25 MB), so show a spinner while it downloads instead of looking frozen.
+echo "Installing srndx from the private feed (the platform package is ~25 MB on first install)..."
+log="$(mktemp)"
+dotnet tool update -g dotnet-srndx --prerelease --configfile "$cfg" >"$log" 2>&1 &
+pid=$!
+if [ -t 2 ]; then
+  spin='|/-\'; i=0; start=$SECONDS
+  while kill -0 "$pid" 2>/dev/null; do
+    i=$(( (i + 1) % 4 ))
+    printf '\r  %s  %ds' "${spin:$i:1}" "$(( SECONDS - start ))" >&2
+    sleep 0.2
+  done
+  printf '\r    \r' >&2
+fi
+rc=0; wait "$pid" || rc=$?
+if [ "$rc" -ne 0 ]; then cat "$log" >&2; rm -f "$log"; exit "$rc"; fi
+grep -iE 'successfully (installed|updated)' "$log" || cat "$log"
+rm -f "$log"
 
 echo "srndx is ready. Run 'srndx --help' to get started."

@@ -36,8 +36,27 @@ try {
     $login = gh api user --jq .login
     $env:NuGetPackageSourceCredentials_srndx = "Username=$login;Password=$(gh auth token)"
 
-    # `dotnet tool update` installs when the tool is absent and upgrades when it is present.
-    dotnet tool update -g dotnet-srndx --prerelease --configfile $cfg
+    # `dotnet tool update` installs when the tool is absent and upgrades when it is present. The platform
+    # package bundles the ML models (~25 MB), so show progress while it downloads instead of looking frozen.
+    Write-Host 'Installing srndx from the private feed (the platform package is ~25 MB on first install)...'
+    $stdout = New-TemporaryFile
+    $stderr = New-TemporaryFile
+    $proc = Start-Process dotnet `
+        -ArgumentList @('tool', 'update', '-g', 'dotnet-srndx', '--prerelease', '--configfile', "$cfg") `
+        -NoNewWindow -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while (-not $proc.HasExited) {
+        Write-Progress -Activity 'Installing srndx (~25 MB)' -Status ("Downloading... {0:n0}s elapsed" -f $sw.Elapsed.TotalSeconds)
+        Start-Sleep -Milliseconds 200
+    }
+    Write-Progress -Activity 'Installing srndx' -Completed
+    if ($proc.ExitCode -ne 0) {
+        Get-Content $stdout, $stderr -ErrorAction SilentlyContinue | Write-Host
+        Remove-Item $stdout, $stderr -Force -ErrorAction SilentlyContinue
+        throw "Install failed (exit code $($proc.ExitCode))."
+    }
+    (Get-Content $stdout | Select-String -Pattern 'successfully (installed|updated)') | ForEach-Object { $_.Line.Trim() }
+    Remove-Item $stdout, $stderr -Force -ErrorAction SilentlyContinue
 }
 finally {
     $env:NuGetPackageSourceCredentials_srndx = $null

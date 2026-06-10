@@ -29,7 +29,7 @@ signed in (`gh auth login`). Then install (or upgrade) with one line, which fetc
 [`eng/install.sh`](eng/install.sh) ([`eng/install.ps1`](eng/install.ps1) on Windows):
 
 ```sh
-gh api repos/ericstj/srndx/contents/eng/install.sh -H "Accept: application/vnd.github.raw" | bash
+bash <(gh api repos/ericstj/srndx/contents/eng/install.sh -H "Accept: application/vnd.github.raw")
 ```
 
 ```powershell
