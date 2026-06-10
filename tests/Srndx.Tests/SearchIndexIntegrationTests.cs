@@ -58,4 +58,29 @@ public class SearchIndexIntegrationTests
         Assert.NotEmpty(results);
         Assert.Equal("Vector search", results[0].Record.Title);
     }
+
+    [ModelFact]
+    public async Task RestoresShardCountFromFileOnLoad()
+    {
+        using var ms = new MemoryStream();
+        using (var index = new SearchIndex(shards: 4))
+        {
+            await index.IndexAsync(Corpus);
+            Assert.Equal(4, index.ShardCount);
+            index.Save(ms);
+        }
+
+        ms.Position = 0;
+        using var reloaded = new SearchIndex(shards: 8);
+        reloaded.Load(ms);
+
+        // The shard layout is a property of the file, not the loader.
+        Assert.Equal(4, reloaded.ShardCount);
+
+        IReadOnlyList<(SearchRecord Record, float Score)> results =
+            await reloaded.SearchAsync("nearest neighbor similarity search", top: 3);
+
+        Assert.NotEmpty(results);
+        Assert.Equal("Vector search", results[0].Record.Title);
+    }
 }

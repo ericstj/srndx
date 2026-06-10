@@ -23,25 +23,41 @@ namespace Srndx;
 /// </summary>
 public sealed class SearchIndex : IDisposable
 {
-    private const string CollectionName = "items";
-
     /// <summary>Default HNSW build parameters; match the Hnsw.Net defaults.</summary>
     private const int DefaultEfConstruction = 200;
     private const int DefaultM = 16;
 
+    /// <summary>
+    /// Default number of vector shards. The vector index is split into this many independent HNSW
+    /// graphs so the build, the cold-start load, and the query fan out across cores; each graph is
+    /// smaller, which also keeps per-insert cost low. Search merges results across shards.
+    /// </summary>
+    private const int DefaultShards = 8;
+
     private readonly FastTextModel _languageModel;
     private readonly Model2VecModel _embedder;
-    private readonly HnswVectorStore _store;
+    private readonly IEmbeddingGenerator<string, Embedding<float>> _generator;
+    private readonly int _efConstruction;
+    private readonly int _m;
+    private readonly int _dimension;
     private readonly Bm25Index _lexical = new();
 
-    /// <summary>Container magic for the combined vector + lexical index file ("SSK" v3).</summary>
-    private const uint IndexMagic = 0x53534B33;
+    private HnswVectorStore _store = null!;
+    private HnswCollection<Guid, SearchRecord>[] _shards = [];
+    private int _shardCount;
+
+    /// <summary>Container magic for the combined vector + lexical index file ("SSK" v4, sharded vectors).</summary>
+    private const uint IndexMagic = 0x53534B34;
 
     /// <param name="efConstruction">
     /// HNSW build-time beam width. Higher builds a better-connected graph (higher recall) but is slower;
     /// lower speeds up indexing. Only affects records added by this instance.
     /// </param>
     /// <param name="m">HNSW maximum connections per node. Higher improves recall at the cost of build time and index size.</param>
+    /// <param name="shards">
+    /// Number of independent vector shards. More shards build, load, and query with more parallelism;
+    /// the value is persisted with the index and restored on load.
+    /// </param>
     [UnconditionalSuppressMessage("Trimming", "IL2026",
         Justification = "The HNSW connector maps SearchRecord by reflection; its members are preserved via ILLink.Descriptors.xml.")]
     [UnconditionalSuppressMessage("AOT", "IL3050",
@@ -51,10 +67,14 @@ public sealed class SearchIndex : IDisposable
         string? embeddingModelPath = null,
         bool cacheEmbeddings = false,
         int efConstruction = DefaultEfConstruction,
-        int m = DefaultM)
+        int m = DefaultM,
+        int shards = DefaultShards)
     {
         _languageModel = FastTextModel.Load(languageModelPath ?? ModelLocator.LanguageModel);
         _embedder = Model2VecModel.Load(embeddingModelPath ?? ModelLocator.EmbeddingModel);
+        _dimension = _embedder.Dimension;
+        _efConstruction = efConstruction;
+        _m = m;
 
         IEmbeddingGenerator<string, Embedding<float>> generator = new ParallelEmbeddingGenerator(_embedder);
         if (cacheEmbeddings)
@@ -62,24 +82,45 @@ public sealed class SearchIndex : IDisposable
             generator = new CachingEmbeddingGenerator(generator);
         }
 
-        var storeOptions = new HnswVectorStoreOptions
-        {
-            EmbeddingGenerator = generator,
-            EfConstruction = efConstruction,
-            M = m,
-        };
-
-        _store = new HnswVectorStore(storeOptions);
-        Collection = _store.GetCollection<Guid, SearchRecord>(CollectionName, BuildDefinition(_embedder.Dimension));
-        Collection.EnsureCollectionExistsAsync().GetAwaiter().GetResult();
+        _generator = generator;
+        ConfigureShards(Math.Max(1, shards));
     }
 
+    /// <summary>The number of vector shards the index is currently split into.</summary>
+    public int ShardCount => _shardCount;
+
     /// <summary>
-    /// The backing collection, exposed as the concrete provider type. The MEVD abstraction has no
-    /// persistence API, so callers "break glass" to this type to reach
-    /// <see cref="HnswCollection{TKey, TRecord}.Save" /> / <see cref="HnswCollection{TKey, TRecord}.Load" />.
+    /// (Re)creates the vector store and its shard collections. Called by the constructor with the
+    /// requested shard count and by the load paths with the count persisted in the file, so a loaded
+    /// index always uses the shard layout it was written with.
     /// </summary>
-    public HnswCollection<Guid, SearchRecord> Collection { get; }
+    [UnconditionalSuppressMessage("Trimming", "IL2026",
+        Justification = "The HNSW connector maps SearchRecord by reflection; its members are preserved via ILLink.Descriptors.xml.")]
+    [UnconditionalSuppressMessage("AOT", "IL3050",
+        Justification = "The HNSW connector maps SearchRecord by reflection; its members are preserved via ILLink.Descriptors.xml.")]
+    private void ConfigureShards(int shardCount)
+    {
+        _store?.Dispose();
+        _shardCount = shardCount;
+        _store = new HnswVectorStore(new HnswVectorStoreOptions
+        {
+            EmbeddingGenerator = _generator,
+            EfConstruction = _efConstruction,
+            M = _m,
+        });
+
+        _shards = new HnswCollection<Guid, SearchRecord>[shardCount];
+        for (int s = 0; s < shardCount; s++)
+        {
+            HnswCollection<Guid, SearchRecord> shard =
+                _store.GetCollection<Guid, SearchRecord>($"items{s}", BuildDefinition(_dimension));
+            shard.EnsureCollectionExistsAsync().GetAwaiter().GetResult();
+            _shards[s] = shard;
+        }
+    }
+
+    /// <summary>Routes a record to a shard by its key; random GUIDs spread evenly across shards.</summary>
+    private int ShardOf(Guid id) => (int)((uint)id.GetHashCode() % (uint)_shardCount);
 
     /// <summary>Detects the dominant language of a piece of text (ISO code and confidence).</summary>
     public (string Language, float Confidence) DetectLanguage(string text)
@@ -116,7 +157,15 @@ public sealed class SearchIndex : IDisposable
             Parallel.For(0, items.Length, i => languages[i] = DetectLanguage(items[i].Text).Language);
         }
 
-        var batch = new List<SearchRecord>(items.Length);
+        // Partition records across shards by key, then build the shard graphs concurrently (each shard
+        // has its own writer lock) while the BM25 add stays single-writer on this thread.
+        var batch = new SearchRecord[items.Length];
+        var buckets = new List<SearchRecord>[_shardCount];
+        for (int s = 0; s < _shardCount; s++)
+        {
+            buckets[s] = [];
+        }
+
         for (int i = 0; i < items.Length; i++)
         {
             var record = new SearchRecord
@@ -128,12 +177,22 @@ public sealed class SearchIndex : IDisposable
                 Language = languages[i],
                 Text = items[i].Text,
             };
-            batch.Add(record);
+            batch[i] = record;
             _lexical.Add(record.Id, $"{record.Title} {record.Text}");
+            buckets[ShardOf(record.Id)].Add(record);
         }
 
-        await Collection.UpsertAsync(batch).ConfigureAwait(false);
-        return batch.ConvertAll(r => r.Id);
+        var upserts = new List<Task>(_shardCount);
+        for (int s = 0; s < _shardCount; s++)
+        {
+            if (buckets[s].Count > 0)
+            {
+                upserts.Add(_shards[s].UpsertAsync(buckets[s]));
+            }
+        }
+
+        await Task.WhenAll(upserts).ConfigureAwait(false);
+        return Array.ConvertAll(batch, r => r.Id);
     }
 
     /// <summary>Language-detects and indexes a batch of items; the store embeds each one.</summary>
@@ -145,14 +204,22 @@ public sealed class SearchIndex : IDisposable
     {
         foreach (Guid id in ids)
         {
-            await Collection.DeleteAsync(id).ConfigureAwait(false);
+            await _shards[ShardOf(id)].DeleteAsync(id).ConfigureAwait(false);
             _lexical.Remove(id);
         }
     }
 
-    /// <summary>Enumerates every stored record.</summary>
-    public IAsyncEnumerable<SearchRecord> EnumerateAllAsync()
-        => Collection.GetAsync(_ => true, int.MaxValue);
+    /// <summary>Enumerates every stored record across all shards.</summary>
+    public async IAsyncEnumerable<SearchRecord> EnumerateAllAsync()
+    {
+        foreach (HnswCollection<Guid, SearchRecord> shard in _shards)
+        {
+            await foreach (SearchRecord record in shard.GetAsync(_ => true, int.MaxValue).ConfigureAwait(false))
+            {
+                yield return record;
+            }
+        }
+    }
 
     /// <summary>
     /// Finds the items most relevant to <paramref name="query" />, with optional filters. Results
@@ -164,16 +231,58 @@ public sealed class SearchIndex : IDisposable
     {
         int pool = Math.Clamp(top * 10, 50, 200);
 
-        // Vector candidates: the store pre-applies the language/source filter.
+        // Embed the query once, then search every shard in parallel by vector (each shard returns up to
+        // `pool` hits). Merge by similarity score into one ranked list - scores are comparable because
+        // every shard uses the same metric - and keep the top `pool` for fusion.
+        GeneratedEmbeddings<Embedding<float>> embedded =
+            await _generator.GenerateAsync([query]).ConfigureAwait(false);
+        ReadOnlyMemory<float> queryVector = embedded[0].Vector;
+        VectorSearchOptions<SearchRecord>? filter = BuildFilter(language, source);
+
+        var shardSearches = new Task<List<VectorSearchResult<SearchRecord>>>[_shardCount];
+        for (int s = 0; s < _shardCount; s++)
+        {
+            HnswCollection<Guid, SearchRecord> shard = _shards[s];
+            shardSearches[s] = Task.Run(async () =>
+            {
+                var hits = new List<VectorSearchResult<SearchRecord>>();
+                await foreach (VectorSearchResult<SearchRecord> result in
+                    shard.SearchAsync(queryVector, pool, filter).ConfigureAwait(false))
+                {
+                    hits.Add(result);
+                }
+
+                return hits;
+            });
+        }
+
+        List<VectorSearchResult<SearchRecord>>[] perShard = await Task.WhenAll(shardSearches).ConfigureAwait(false);
+
+        var merged = new List<VectorSearchResult<SearchRecord>>(_shardCount * pool);
+        foreach (List<VectorSearchResult<SearchRecord>> hits in perShard)
+        {
+            merged.AddRange(hits);
+        }
+
+        merged.Sort(static (a, b) => (b.Score ?? 0d).CompareTo(a.Score ?? 0d));
+
         var records = new Dictionary<Guid, SearchRecord>();
         var vectorRanked = new List<Guid>();
         var vectorScore = new Dictionary<Guid, double>();
-        await foreach (VectorSearchResult<SearchRecord> result in
-            Collection.SearchAsync(query, pool, BuildFilter(language, source)).ConfigureAwait(false))
+        foreach (VectorSearchResult<SearchRecord> result in merged)
         {
+            if (records.ContainsKey(result.Record.Id))
+            {
+                continue;
+            }
+
             records[result.Record.Id] = result.Record;
             vectorRanked.Add(result.Record.Id);
             vectorScore[result.Record.Id] = result.Score ?? 0d;
+            if (vectorRanked.Count >= pool)
+            {
+                break;
+            }
         }
 
         // Lexical candidates from BM25.
@@ -203,7 +312,7 @@ public sealed class SearchIndex : IDisposable
             if (!records.TryGetValue(id, out SearchRecord? record))
             {
                 // Lexical-only hit: fetch the record and apply the filter the vector path got for free.
-                record = await Collection.GetAsync(id).ConfigureAwait(false);
+                record = await _shards[ShardOf(id)].GetAsync(id).ConfigureAwait(false);
                 if (record is null || !Matches(record, language, source))
                 {
                     continue;
@@ -237,63 +346,98 @@ public sealed class SearchIndex : IDisposable
         return topResults;
     }
 
-    /// <summary>Persists the vector and lexical indexes to a single stream.</summary>
+    /// <summary>Persists the sharded vector index and the lexical index to a single stream.</summary>
     public void Save(Stream stream)
     {
+        // Serialize the shards in parallel (independent collections), then lay them out as
+        // length-prefixed segments so the load path can map each at a known offset.
+        var segments = new byte[_shardCount][];
+        Parallel.For(0, _shardCount, s =>
+        {
+            using var buffer = new MemoryStream();
+            _shards[s].Save(buffer, SearchSerializerContext.Default);
+            segments[s] = buffer.ToArray();
+        });
+
         using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
         writer.Write(IndexMagic);
-
-        using var vector = new MemoryStream();
-        Collection.Save(vector, SearchSerializerContext.Default);
-        writer.Write(vector.Length);
+        writer.Write(_shardCount);
+        foreach (byte[] segment in segments)
+        {
+            writer.Write((long)segment.Length);
+        }
         writer.Flush();
-        vector.Position = 0;
-        vector.CopyTo(stream);
+
+        foreach (byte[] segment in segments)
+        {
+            stream.Write(segment, 0, segment.Length);
+        }
 
         _lexical.Save(writer);
     }
 
-    /// <summary>Loads a vector and lexical index previously written by <see cref="Save" />.</summary>
+    /// <summary>Loads a sharded index previously written by <see cref="Save" />.</summary>
     public void Load(Stream stream, bool tracking = false)
     {
-        byte[] vectorBytes;
-        byte[] lexicalBytes;
-        using (var reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: true))
+        using var reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: true);
+        if (reader.ReadUInt32() != IndexMagic)
         {
-            if (reader.ReadUInt32() != IndexMagic)
-            {
-                throw new InvalidDataException("Unrecognized index format. Rebuild the index with 'srndx index'.");
-            }
-
-            long vectorLength = reader.ReadInt64();
-            vectorBytes = reader.ReadBytes((int)vectorLength);
-            using var rest = new MemoryStream();
-            stream.CopyTo(rest);
-            lexicalBytes = rest.ToArray();
+            throw new InvalidDataException("Unrecognized index format. Rebuild the index with 'srndx index'.");
         }
 
-        // The two indexes are independent; load them on separate cores so cold start pays
-        // max(vector, lexical) instead of their sum.
-        Task vectorTask = Task.Run(() =>
+        int shardCount = reader.ReadInt32();
+        if (shardCount <= 0)
         {
-            using var vector = new MemoryStream(vectorBytes, writable: false);
-            Collection.Load(vector, SearchSerializerContext.Default);
-        });
-        Task lexicalTask = Task.Run(() =>
+            throw new InvalidDataException("Invalid shard count in index header.");
+        }
+
+        var segLengths = new long[shardCount];
+        for (int s = 0; s < shardCount; s++)
+        {
+            segLengths[s] = reader.ReadInt64();
+        }
+
+        var segments = new byte[shardCount][];
+        for (int s = 0; s < shardCount; s++)
+        {
+            segments[s] = reader.ReadBytes((int)segLengths[s]);
+        }
+
+        using var rest = new MemoryStream();
+        stream.CopyTo(rest);
+        byte[] lexicalBytes = rest.ToArray();
+
+        ConfigureShards(shardCount);
+
+        // The shards and the lexical index are independent; load them on separate cores so cold start
+        // pays max(slowest shard, lexical) rather than their sum.
+        var tasks = new List<Task>(shardCount + 1);
+        for (int s = 0; s < shardCount; s++)
+        {
+            int shard = s;
+            tasks.Add(Task.Run(() =>
+            {
+                using var seg = new MemoryStream(segments[shard], writable: false);
+                _shards[shard].Load(seg, SearchSerializerContext.Default);
+            }));
+        }
+
+        tasks.Add(Task.Run(() =>
         {
             using var lexical = new MemoryStream(lexicalBytes, writable: false);
             using var lexReader = new BinaryReader(lexical, Encoding.UTF8);
             _lexical.Load(lexReader, tracking);
-        });
-        Task.WaitAll(vectorTask, lexicalTask);
+        }));
+
+        Task.WaitAll([.. tasks]);
     }
 
     /// <summary>
-    /// Loads an index from a file, memory-mapping the vector index instead of reading it into memory.
+    /// Loads an index from a file, memory-mapping each vector shard instead of reading it into memory.
     /// This is the read-only cold-start path: record payloads and vectors are faulted in on demand, so
-    /// startup cost is independent of index size. When <paramref name="tracking" /> is set the index will
-    /// be mutated (watch/serve), which a memory-mapped index cannot support, so it falls back to a
-    /// fully-materialized load.
+    /// startup cost is independent of index size. The shards and the lexical index are mapped on separate
+    /// cores. When <paramref name="tracking" /> is set the index will be mutated (watch/serve), which a
+    /// memory-mapped index cannot support, so it falls back to a fully-materialized load.
     /// </summary>
     public void Load(string path, bool tracking = false)
     {
@@ -306,8 +450,9 @@ public sealed class SearchIndex : IDisposable
             return;
         }
 
-        long vectorOffset;
-        long vectorLength;
+        int shardCount;
+        long[] segLengths;
+        long headerEnd;
         using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
         using (var reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: true))
         {
@@ -316,15 +461,42 @@ public sealed class SearchIndex : IDisposable
                 throw new InvalidDataException("Unrecognized index format. Rebuild the index with 'srndx index'.");
             }
 
-            vectorLength = reader.ReadInt64();
-            vectorOffset = stream.Position;
+            shardCount = reader.ReadInt32();
+            if (shardCount <= 0)
+            {
+                throw new InvalidDataException("Invalid shard count in index header.");
+            }
+
+            segLengths = new long[shardCount];
+            for (int s = 0; s < shardCount; s++)
+            {
+                segLengths[s] = reader.ReadInt64();
+            }
+
+            headerEnd = stream.Position;
         }
 
-        long lexicalOffset = vectorOffset + vectorLength;
+        ConfigureShards(shardCount);
 
-        Task vectorTask = Task.Run(() => Collection.Load(path, vectorOffset, SearchSerializerContext.Default));
-        Task lexicalTask = Task.Run(() => _lexical.LoadMapped(path, lexicalOffset));
-        Task.WaitAll(vectorTask, lexicalTask);
+        var offsets = new long[shardCount];
+        long offset = headerEnd;
+        for (int s = 0; s < shardCount; s++)
+        {
+            offsets[s] = offset;
+            offset += segLengths[s];
+        }
+
+        long lexicalOffset = offset;
+
+        var tasks = new List<Task>(shardCount + 1);
+        for (int s = 0; s < shardCount; s++)
+        {
+            int shard = s;
+            tasks.Add(Task.Run(() => _shards[shard].Load(path, offsets[shard], SearchSerializerContext.Default)));
+        }
+
+        tasks.Add(Task.Run(() => _lexical.LoadMapped(path, lexicalOffset)));
+        Task.WaitAll([.. tasks]);
     }
 
     private static VectorSearchOptions<SearchRecord>? BuildFilter(string? language, string? source)
@@ -353,13 +525,16 @@ public sealed class SearchIndex : IDisposable
     private static void Accumulate(Dictionary<Guid, double> map, Guid id, double add) =>
         map[id] = map.TryGetValue(id, out double s) ? s + add : add;
 
-    /// <summary>Counts the stored items by enumerating the collection.</summary>
+    /// <summary>Counts the stored items across all shards.</summary>
     public async Task<int> CountAsync()
     {
         int count = 0;
-        await foreach (SearchRecord _ in Collection.GetAsync(_ => true, int.MaxValue).ConfigureAwait(false))
+        foreach (HnswCollection<Guid, SearchRecord> shard in _shards)
         {
-            count++;
+            await foreach (SearchRecord _ in shard.GetAsync(_ => true, int.MaxValue).ConfigureAwait(false))
+            {
+                count++;
+            }
         }
 
         return count;

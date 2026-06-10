@@ -25,6 +25,11 @@ var efConstructionOption = new Option<int>("--ef-construction")
     Description = "HNSW build beam width (default 200). Lower values index faster with slightly lower vector recall.",
     DefaultValueFactory = _ => 200,
 };
+var shardsOption = new Option<int>("--shards")
+{
+    Description = "Number of vector shards to build in parallel (default 8). More shards index, load, and query with more parallelism.",
+    DefaultValueFactory = _ => 8,
+};
 
 var indexCommand = new Command("index", "Build a search index from local files and/or git history.")
 {
@@ -33,13 +38,15 @@ var indexCommand = new Command("index", "Build a search index from local files a
     maxCommitsOption,
     outOption,
     efConstructionOption,
+    shardsOption,
 };
 indexCommand.SetAction((parseResult, _) => RunIndexAsync(
     parseResult.GetValue(filesOption),
     parseResult.GetValue(gitOption),
     parseResult.GetValue(maxCommitsOption),
     parseResult.GetValue(outOption)!,
-    parseResult.GetValue(efConstructionOption)));
+    parseResult.GetValue(efConstructionOption),
+    parseResult.GetValue(shardsOption)));
 
 var queryArgument = new Argument<string>("query")
 {
@@ -224,7 +231,7 @@ var root = new RootCommand(
 
 return await root.Parse(args).InvokeAsync();
 
-static async Task<int> RunIndexAsync(string? filesDir, string? gitRepo, int maxCommits, string outPath, int efConstruction)
+static async Task<int> RunIndexAsync(string? filesDir, string? gitRepo, int maxCommits, string outPath, int efConstruction, int shards)
 {
     if (filesDir is null && gitRepo is null)
     {
@@ -238,8 +245,14 @@ static async Task<int> RunIndexAsync(string? filesDir, string? gitRepo, int maxC
         return 1;
     }
 
+    if (shards <= 0)
+    {
+        Console.Error.WriteLine("--shards must be positive.");
+        return 1;
+    }
+
     Console.OutputEncoding = System.Text.Encoding.UTF8;
-    using var index = new SearchIndex(efConstruction: efConstruction);
+    using var index = new SearchIndex(efConstruction: efConstruction, shards: shards);
 
     int total = 0;
     if (filesDir is not null)

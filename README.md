@@ -28,11 +28,13 @@ with the semantic vector index via reciprocal-rank fusion, so both keyword and i
    - **Commits** become one passage each (subject + body), located by short SHA.
    - Every passage is language-detected (FastText.Net) and embedded automatically by the vector
      store (Model2Vec.Net, wired in as an `IEmbeddingGenerator`); its tokens are also added to a
-     built-in BM25 lexical index.
-   - The vector index and the BM25 lexical index are persisted together to a single file.
+     built-in BM25 lexical index. Language detection and embedding run in parallel across cores.
+   - The vector index is split into independent HNSW shards (`--shards`, default 8) that are built
+     in parallel; they are persisted together with the BM25 lexical index to a single file.
 2. **`search`** loads that index and returns the most relevant passages by fusing semantic similarity
    (the vector index) with lexical BM25 relevance (reciprocal-rank fusion), with optional
-   `--lang` and `--source` filters (MEVD LINQ filters under the hood).
+   `--lang` and `--source` filters (MEVD LINQ filters under the hood). The shards are memory-mapped
+   and searched in parallel, then merged, so both cold-start load and query fan out across cores.
 3. **`serve`** keeps an index in sync with a watched directory and answers queries interactively.
    - It builds the index on first run (or loads an existing one), then watches the directory with a
      `FileSystemWatcher` and re-indexes on change. A burst of edits is coalesced over a short
@@ -103,9 +105,11 @@ running, a one-shot `srndx search` against the same index is answered by that re
 loopback socket, skipping the cold-start index load; it falls back to loading the index locally when no
 server is running.
 
-Indexing detects each passage's language and embeds it in parallel across CPU cores; the vector graph
-is built single-threaded. `srndx index --ef-construction <N>` (default 200) trades a little vector
-recall for a faster build — lower values build the HNSW graph more quickly.
+Indexing detects each passage's language and embeds it in parallel across CPU cores, and builds the
+vector index as several independent HNSW shards (`--shards`, default 8) in parallel — so the build, the
+cold-start load, and the query all scale with cores. Sharding preserves recall (each query searches
+every shard and merges the results). `srndx index --ef-construction <N>` (default 200) trades a little
+vector recall for a faster build — lower values build each HNSW graph more quickly.
 
 ## Benchmarks: hybrid search vs `grep`
 
@@ -160,7 +164,27 @@ What this shows:
   returned a loosely related top hit (`~`) — expected from the tiny `potion-base-2M` model; swapping a
   larger Model2Vec model trades startup/footprint for better semantic ranking with no code change.
 
-## Models
+## Benchmarks: sharded indexing
+
+The vector index is split into independent HNSW shards (`--shards`, default 8) that are built, loaded,
+and searched in parallel. Measured on the full [`dotnet/runtime`](https://github.com/dotnet/runtime)
+tree (57,923 files → 624,656 passages, 1.45 GB index) with the Native-AOT executable, single-graph
+(`--shards 1`) vs the default 8 shards on the same machine:
+
+| | `--shards 1` | `--shards 8` | change |
+| --- | ---: | ---: | ---: |
+| `srndx index` build | 490.9 s | 148.0 s | **3.3× faster** |
+| cold one-shot `search` (load + query) | 2.25 s | 1.41 s | **1.6× faster** |
+| index size | 1449 MB | 1449 MB | same |
+
+Sharding speeds the build (smaller graphs parallelize *and* have cheaper per-insert cost), the
+cold-start load (each shard is a memory-mapped segment, mapped on its own core), and the query (shards
+are searched concurrently, then merged). **Recall is preserved**: top-10 results overlap the
+single-graph index ~92%, which is within the ~94% overlap two independent single-graph rebuilds already
+have — the drift is ordinary approximate-nearest-neighbor nondeterminism, not a sharding penalty (a
+synthetic ground-truth check confirms sharded recall is at least as high as the single graph).
+
+
 
 The tool needs two model files. When installed as a packaged tool they are bundled alongside the
 binary; otherwise they are resolved from the `models/` folder next to the binary:
@@ -186,10 +210,10 @@ ranking with no code change.
 
 The `Microsoft.Extensions.VectorData` abstraction has no save/load API. `srndx` follows the
 ecosystem convention of *breaking glass* to the concrete provider type: it holds the concrete
-`HnswCollection<TKey, TRecord>` and calls its provider-specific `Save` / `Load`. Everything else —
-embedding, upsert, filtered search — goes through the standard abstractions, so swapping Hnsw.Net
-for another vector store (Qdrant, Azure AI Search, Postgres pgvector, …) or Model2Vec.Net for
-another embedder is a one-line change.
+`HnswCollection<TKey, TRecord>` shards and calls their provider-specific `Save` / `Load` (each shard
+is one mappable segment in the index file). Everything else — embedding, upsert, filtered search —
+goes through the standard abstractions, so swapping Hnsw.Net for another vector store (Qdrant, Azure AI
+Search, Postgres pgvector, …) or Model2Vec.Net for another embedder is a one-line change.
 
 ## Native AOT
 

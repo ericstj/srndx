@@ -30,10 +30,9 @@ public sealed class ParallelEmbeddingGenerator(
         }
 
         int chunk = (inputs.Count + partitions - 1) / partitions;
-        var tasks = new Task<GeneratedEmbeddings<Embedding<float>>>[partitions];
-        for (int p = 0; p < partitions; p++)
+        var tasks = new List<Task<GeneratedEmbeddings<Embedding<float>>>>(partitions);
+        for (int start = 0; start < inputs.Count; start += chunk)
         {
-            int start = p * chunk;
             int end = Math.Min(start + chunk, inputs.Count);
             string[] slice = new string[end - start];
             for (int i = start; i < end; i++)
@@ -41,7 +40,7 @@ public sealed class ParallelEmbeddingGenerator(
                 slice[i - start] = inputs[i];
             }
 
-            tasks[p] = Task.Run(() => base.GenerateAsync(slice, options, cancellationToken), cancellationToken);
+            tasks.Add(Task.Run(() => base.GenerateAsync(slice, options, cancellationToken), cancellationToken));
         }
 
         GeneratedEmbeddings<Embedding<float>>[] parts = await Task.WhenAll(tasks).ConfigureAwait(false);

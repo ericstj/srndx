@@ -69,4 +69,24 @@ public class ParallelEmbeddingGeneratorTests
         Assert.Equal(1, inner.CallCount);
         Assert.Equal(7, result[0].Vector.Span[0]);
     }
+
+    [Theory]
+    [InlineData(41, 20)]
+    [InlineData(7, 4)]
+    [InlineData(5, 5)]
+    [InlineData(101, 8)]
+    public async Task HandlesCountsThatDoNotDivideEvenlyByDegree(int count, int degree)
+    {
+        var inner = new IndexEchoGenerator();
+        using var parallel = new ParallelEmbeddingGenerator(inner, maxDegreeOfParallelism: degree);
+
+        string[] inputs = [.. Enumerable.Range(0, count).Select(i => i.ToString())];
+        GeneratedEmbeddings<Embedding<float>> result = await parallel.GenerateAsync(inputs);
+
+        Assert.Equal(count, result.Count);
+        for (int i = 0; i < count; i++)
+        {
+            Assert.Equal(i, result[i].Vector.Span[0]);
+        }
+    }
 }
