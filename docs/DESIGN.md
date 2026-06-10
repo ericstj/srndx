@@ -118,5 +118,5 @@ native-AOT packages for common platforms (`dotnet pack -r <rid>`) plus a portabl
 (`dotnet pack -r any -p:PublishAot=false`) selected when no RID matches, and a RID-agnostic pointer
 package (`dotnet pack`) that ties `dotnet tool install dotnet-srndx` to the right platform package.
 The ML models are bundled into each package, so the installed tool is self-contained. CI builds every
-package on its matching OS; publishing pushes the RID-specific packages first and the pointer package
-last, all at the same version.
+package on its matching OS on each push, and on a version tag (`v*`) publishes the set to the
+repository's private GitHub Packages feed.

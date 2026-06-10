@@ -18,14 +18,32 @@ index via reciprocal-rank fusion, so both keyword and intent matches surface fro
 
 ## Install
 
-`srndx` ships as a [RID-specific .NET tool](https://learn.microsoft.com/dotnet/core/tools/rid-specific-tools):
+`srndx` is published to this repository's **private [GitHub Packages](https://docs.github.com/packages)
+NuGet feed** as a [RID-specific .NET tool](https://learn.microsoft.com/dotnet/core/tools/rid-specific-tools):
 native-AOT packages for common platforms plus a portable fallback. The CLI picks the best match for your
 machine, and the ML models are bundled in, so the tool is self-contained.
 
+The feed is private, so authenticate once with a GitHub
+[personal access token](https://github.com/settings/tokens) that has the `read:packages` scope, then
+install:
+
 ```sh
-dotnet tool install -g dotnet-srndx
+# Register the private feed (credentials are saved to your user-level NuGet config)
+dotnet nuget add source https://nuget.pkg.github.com/ericstj/index.json \
+  --name srndx-github \
+  --username YOUR_GITHUB_USERNAME \
+  --password YOUR_GITHUB_PAT \
+  --store-password-in-clear-text
+
+# Install the tool from that feed
+dotnet tool install -g dotnet-srndx \
+  --add-source https://nuget.pkg.github.com/ericstj/index.json
+
 srndx --help
 ```
+
+New versions are published by CI when a `v*` tag is pushed; upgrade with
+`dotnet tool update -g dotnet-srndx --add-source https://nuget.pkg.github.com/ericstj/index.json`.
 
 ## Usage
 
