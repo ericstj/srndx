@@ -30,7 +30,7 @@ match. Different contracts — see the takeaways.
 
 `srndx` builds a richer index — dense embeddings for every passage plus a BM25 lexical index — so it is
 larger and slower to build than a keyword-only index. Sharding cut that build from ~491 s to ~155 s
-(see the sharding section in the [README](README.md)); it is still a one-time cost amortized over every
+(see the sharding section in the [README](../README.md)); it is still a one-time cost amortized over every
 later query. The plain greps have no build step.
 
 ## Literal identifiers
@@ -72,7 +72,7 @@ results returned, across four intent queries (e.g. *"cancel an async operation w
 Every literal tool — including the fast indexed one — returns **nothing**, because none of the query
 words appear in the relevant code. `srndx` is the only tool that answers these queries at all, returning
 5 ranked passages in ~80 ms warm. (For an example of the passages `srndx` surfaces for intent queries,
-see the qualitative table in the [README](README.md).)
+see the qualitative table in the [README](../README.md).)
 
 ## Takeaways
 

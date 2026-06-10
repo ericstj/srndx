@@ -35,14 +35,9 @@
     <RepositoryType>git</RepositoryType>
   </PropertyGroup>
 
-  <!-- The test project lives under tests/ within this project's directory; keep its sources out of the app. -->
+  <!-- The test project lives under tests/ at the repo root; nothing to exclude from the app here. -->
   <ItemGroup>
-    <Compile Remove="tests\**\*.cs" />
-    <None Remove="tests\**\*" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <None Include="README.md" Pack="true" PackagePath="\" />
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
     <InternalsVisibleTo Include="Srndx.Tests" />
   </ItemGroup>
 

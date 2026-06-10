@@ -14,17 +14,17 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\Srndx.csproj" />
+    <ProjectReference Include="..\..\src\Srndx\Srndx.csproj" />
   </ItemGroup>
 
   <!--
-    Integration tests load the real models. The referenced app downloads them to repo models/ at
+    Integration tests load the real models. The referenced app downloads them to src/Srndx/models at
     build time; mirror that folder into the test output so ModelLocator resolves them next to the
     test assembly. When the models are absent (e.g. offline), the integration tests skip gracefully.
   -->
   <Target Name="CopyModelsForTests" AfterTargets="Build">
     <ItemGroup>
-      <_TestModel Include="$(MSBuildThisFileDirectory)..\..\models\**\*" />
+      <_TestModel Include="$(MSBuildThisFileDirectory)..\..\src\Srndx\models\**\*" />
     </ItemGroup>
     <Copy Condition="'@(_TestModel)' != ''" SourceFiles="@(_TestModel)" DestinationFiles="@(_TestModel->'$(OutDir)models\%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="true" />
   </Target>

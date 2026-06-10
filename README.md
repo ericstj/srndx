@@ -14,7 +14,7 @@ libraries through the standard .NET AI ecosystem abstractions:
 
 No GPU, no cloud, no API key, no native binary. Everything runs in-process, anywhere .NET runs.
 
-Search is **hybrid**: a built-in [BM25 lexical index](Bm25Index.cs) (exact-token relevance) is fused
+Search is **hybrid**: a built-in [BM25 lexical index](src/Srndx/Bm25Index.cs) (exact-token relevance) is fused
 with the semantic vector index via reciprocal-rank fusion, so both keyword and intent matches surface.
 
 ## How it works
@@ -44,7 +44,7 @@ with the semantic vector index via reciprocal-rank fusion, so both keyword and i
      band, pruning it if it turns out to be ignored - so indexing never blocks on git.
    - The index is persisted atomically after each batch and on shutdown (`:quit` or Ctrl+C).
    - Re-indexing repeated/unchanged passages is short-circuited by a small
-     [`Microsoft.Extensions.AI` embedding cache](CachingEmbeddingGenerator.cs) layered in front of
+     [`Microsoft.Extensions.AI` embedding cache](src/Srndx/CachingEmbeddingGenerator.cs) layered in front of
      the embedder (a `DelegatingEmbeddingGenerator`, the standard MEAI middleware extension point).
 4. **`mcp`** runs the same self-updating index as a [Model Context Protocol](https://modelcontextprotocol.io)
    server over stdio, exposing a single `search` tool so agents can query by meaning while the index
@@ -119,7 +119,7 @@ Native-AOT `srndx` executable, against `git grep` run from the repo root.
 
 > A full head-to-head against `grep`, `ripgrep`, `git grep`, and `tgrep` on the much larger
 > [`dotnet/runtime`](https://github.com/dotnet/runtime) tree (624,656 passages) — build time, literal
-> latency, and natural-language latency — is in [BENCHMARKS.md](BENCHMARKS.md). Short version: warm
+> latency, and natural-language latency — is in [BENCHMARKS.md](doc/BENCHMARKS.md). Short version: warm
 > `srndx` matches the fastest indexed grep on exact identifiers (~38 ms) *and* is the only tool that
 > answers natural-language queries at all.
 
@@ -227,14 +227,14 @@ Search, Postgres pgvector, …) or Model2Vec.Net for another embedder is a one-l
 dependency**:
 
 ```sh
-dotnet publish -r win-x64 -c Release
+dotnet publish src/Srndx/Srndx.csproj -r win-x64 -c Release
 ```
 
 Two things make this work:
 
 - **Reflection-free persistence.** Hnsw.Net's `Save(Stream, JsonSerializerContext)` /
   `Load(Stream, JsonSerializerContext)` overloads take a source-generated
-  [`JsonSerializerContext`](SearchSerializerContext.cs), so records serialize without runtime
+  [`JsonSerializerContext`](src/Srndx/SearchSerializerContext.cs), so records serialize without runtime
   reflection.
 - **Preserved record shape.** The MEVD connector maps the record by reflection; its members are
   kept under trimming via [`ILLink.Descriptors.xml`](ILLink.Descriptors.xml).
