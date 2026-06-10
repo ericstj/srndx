@@ -117,6 +117,12 @@ How does hybrid (semantic + BM25) search compare to literal search? Measured on
 [`dotnet/extensions`](https://github.com/dotnet/extensions) (3,661 indexed files) with the
 Native-AOT `srndx` executable, against `git grep` run from the repo root.
 
+> A full head-to-head against `grep`, `ripgrep`, `git grep`, and `tgrep` on the much larger
+> [`dotnet/runtime`](https://github.com/dotnet/runtime) tree (624,656 passages) — build time, literal
+> latency, and natural-language latency — is in [BENCHMARKS.md](BENCHMARKS.md). Short version: warm
+> `srndx` matches the fastest indexed grep on exact identifiers (~38 ms) *and* is the only tool that
+> answers natural-language queries at all.
+
 Building the index is a one-time cost; `git grep` pays its full cost on every query:
 
 | | value |
