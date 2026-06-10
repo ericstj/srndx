@@ -21,35 +21,32 @@ index via reciprocal-rank fusion, so both keyword and intent matches surface fro
 `srndx` is published to this repository's **private [GitHub Packages](https://docs.github.com/packages)
 NuGet feed** as a [RID-specific .NET tool](https://learn.microsoft.com/dotnet/core/tools/rid-specific-tools):
 native-AOT packages for common platforms plus a portable fallback. The CLI picks the best match for your
-machine, and the ML models are bundled in, so the tool is self-contained.
+machine, and the ML models are bundled in, so the tool is self-contained. CI publishes a rolling
+prerelease on every push to `main`, and a stable version on each `v*` tag.
 
-The feed is private, so installing needs a credential with the `read:packages` scope. Register the feed
-by name **without** a password, then pass the token only through the environment at install time — so it
-never lands in `nuget.config`. The token is borrowed from the [GitHub CLI](https://cli.github.com), so
-there's no personal access token to create:
+You need the [.NET SDK](https://dotnet.microsoft.com) and the [GitHub CLI](https://cli.github.com),
+signed in (`gh auth login`). Then install (or upgrade) with one line, which fetches and runs the helper
+[`eng/install.sh`](eng/install.sh) ([`eng/install.ps1`](eng/install.ps1) on Windows):
 
 ```sh
-# One-time setup
+gh api repos/ericstj/srndx/contents/eng/install.sh -H "Accept: application/vnd.github.raw" | bash
+```
+
+```powershell
+gh api repos/ericstj/srndx/contents/eng/install.ps1 -H "Accept: application/vnd.github.raw" | Out-String | iex
+```
+
+The script grants `gh` the `read:packages` scope if needed and installs the tool, passing the feed token
+through an environment variable so it is **never written to any NuGet config**. Equivalent manual steps:
+
+```sh
 gh auth refresh -h github.com -s read:packages                                        # let gh read packages
 dotnet nuget add source https://nuget.pkg.github.com/ericstj/index.json --name srndx   # URL only — no secret on disk
 
-# Install — the token lives only in the environment variable, scoped to this one command
+# The token lives only in this environment variable, scoped to the one command
 NuGetPackageSourceCredentials_srndx="Username=$(gh api user --jq .login);Password=$(gh auth token)" \
-  dotnet tool install -g dotnet-srndx
-
-srndx --help
+  dotnet tool update -g dotnet-srndx --prerelease
 ```
-
-In PowerShell, set the variable then run the install:
-
-```powershell
-$env:NuGetPackageSourceCredentials_srndx = "Username=$(gh api user --jq .login);Password=$(gh auth token)"
-dotnet tool install -g dotnet-srndx
-$env:NuGetPackageSourceCredentials_srndx = $null
-```
-
-New versions are published by CI when a `v*` tag is pushed; upgrade with the same credential line in front
-of `dotnet tool update -g dotnet-srndx`.
 
 > `dotnet tool install` has no flag for feed credentials, so NuGet reads them from the
 > `NuGetPackageSourceCredentials_<source-name>` environment variable, matched to the source by name —
