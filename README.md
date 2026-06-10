@@ -23,27 +23,36 @@ NuGet feed** as a [RID-specific .NET tool](https://learn.microsoft.com/dotnet/co
 native-AOT packages for common platforms plus a portable fallback. The CLI picks the best match for your
 machine, and the ML models are bundled in, so the tool is self-contained.
 
-The feed is private, so authenticate once with a GitHub
-[personal access token](https://github.com/settings/tokens) that has the `read:packages` scope, then
-install:
+The feed is private, so installing needs a credential with the `read:packages` scope. The cleanest way
+is to borrow the [GitHub CLI](https://cli.github.com)'s own token — no personal access token to create
+or store. Grant `gh` the scope once, then add the feed only for the install and remove it after, so no
+credential lingers in your NuGet config:
 
 ```sh
-# Register the private feed (credentials are saved to your user-level NuGet config)
+# One-time: let your gh login read packages (opens a browser to grant the scope)
+gh auth refresh -h github.com -s read:packages
+
+# Add the feed with gh's token, install, then drop the source again
 dotnet nuget add source https://nuget.pkg.github.com/ericstj/index.json \
   --name srndx-github \
-  --username YOUR_GITHUB_USERNAME \
-  --password YOUR_GITHUB_PAT \
+  --username "$(gh api user --jq .login)" \
+  --password "$(gh auth token)" \
   --store-password-in-clear-text
-
-# Install the tool from that feed
-dotnet tool install -g dotnet-srndx \
-  --add-source https://nuget.pkg.github.com/ericstj/index.json
+dotnet tool install -g dotnet-srndx
+dotnet nuget remove source srndx-github
 
 srndx --help
 ```
 
-New versions are published by CI when a `v*` tag is pushed; upgrade with
-`dotnet tool update -g dotnet-srndx --add-source https://nuget.pkg.github.com/ericstj/index.json`.
+In PowerShell, substitute the command expansions: `--username (gh api user --jq .login) --password (gh auth token)`.
+
+New versions are published by CI when a `v*` tag is pushed. Upgrade by re-running the three feed steps
+above with `dotnet tool update -g dotnet-srndx` in place of `install`.
+
+> `gh` cannot mint a separate throwaway PAT — GitHub no longer exposes a token-creation API — so this
+> reuses `gh`'s existing managed session token (revoke it any time with `gh auth logout`). If you'd
+> rather use your own token, create a [personal access token](https://github.com/settings/tokens) with
+> `read:packages` and pass it as `--password` instead.
 
 ## Usage
 
