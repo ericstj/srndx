@@ -1,4 +1,4 @@
-namespace SemanticSearch;
+namespace Srndx;
 
 /// <summary>A unit of content to index, produced by a source (files or git) before embedding.</summary>
 /// <param name="Source">Origin tag: <c>file</c> or <c>git</c>.</param>

@@ -2,7 +2,10 @@
 bin/
 obj/
 
-# Local-only NuGet feed override (used while Hnsw.Net 0.1.2 is unreleased)
+# NuGet pack output (RID-specific tool packages)
+artifacts/
+
+# Local-only NuGet feed override (developer convenience)
 nuget.config.local
 
 # Generated index files

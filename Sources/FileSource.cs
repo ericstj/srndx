@@ -1,6 +1,6 @@
 using System.Diagnostics;
 
-namespace SemanticSearch;
+namespace Srndx;
 
 /// <summary>
 /// Walks a directory tree and yields text passages. Files are split into passages on blank-line

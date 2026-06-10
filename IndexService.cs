@@ -1,10 +1,10 @@
 using System.Collections.Concurrent;
 using System.Threading.Channels;
 
-namespace SemanticSearch;
+namespace Srndx;
 
 /// <summary>
-/// Runs ssearch as a long-lived service: it keeps an on-disk index in sync with a watched files
+/// Runs srndx as a long-lived service: it keeps an on-disk index in sync with a watched files
 /// directory and answers interactive queries against the live, in-memory index.
 /// <para>
 /// File changes are coalesced over a short debounce window, then applied incrementally - the records
@@ -51,6 +51,11 @@ public sealed class IndexService
     /// <summary>Searches the live, in-memory index. Safe to call while the watcher is re-indexing.</summary>
     public Task<IReadOnlyList<(SearchRecord Record, float Score)>> SearchAsync(string query, int top) =>
         _index.SearchAsync(query, top);
+
+    /// <summary>Searches the live index with optional language/source filters (used by the warm-query endpoint).</summary>
+    public Task<IReadOnlyList<(SearchRecord Record, float Score)>> SearchAsync(
+        string query, int top, string? language, string? source) =>
+        _index.SearchAsync(query, top, language, source);
 
     /// <summary>Counts the passages currently in the index.</summary>
     public Task<int> CountAsync() => _index.CountAsync();

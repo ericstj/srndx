@@ -1,7 +1,7 @@
 using Microsoft.Extensions.AI;
 using System.Collections.Concurrent;
 
-namespace SemanticSearch;
+namespace Srndx;
 
 /// <summary>
 /// A Microsoft.Extensions.AI embedding middleware that memoizes embeddings by input text. It is the

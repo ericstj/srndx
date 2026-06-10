@@ -1,4 +1,4 @@
-namespace SemanticSearch;
+namespace Srndx;
 
 /// <summary>Formats search results for the console, shared by the <c>search</c> and <c>serve</c> commands.</summary>
 public static class ConsoleResults

@@ -17,7 +17,10 @@ jobs:
           dotnet-version: 10.0.x
 
       - name: Restore
-        run: dotnet restore SemanticSearch.sln
+        run: dotnet restore Srndx.sln
 
       - name: Build
-        run: dotnet build SemanticSearch.sln -c Release --no-restore
+        run: dotnet build Srndx.sln -c Release --no-restore
+
+      - name: Test
+        run: dotnet test Srndx.sln -c Release --no-build

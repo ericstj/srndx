@@ -1,11 +1,11 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
-namespace SemanticSearch;
+namespace Srndx;
 
 /// <summary>
-/// Emits per-repository integration files: an MCP server entry so agents can reach ssearch's live
-/// <c>search</c> tool, and an Agent Skill so agents know how to drive the ssearch CLI directly.
+/// Emits per-repository integration files: an MCP server entry so agents can reach srndx's live
+/// <c>search</c> tool, and an Agent Skill so agents know how to drive the srndx CLI directly.
 /// </summary>
 internal static class Installers
 {
@@ -19,8 +19,8 @@ internal static class Installers
         }
 
         string path = configPath is not null ? Path.GetFullPath(configPath) : Path.Combine(repo, ".github", "mcp.json");
-        string exe = command ?? Environment.ProcessPath ?? "ssearch";
-        string index = indexPath ?? Path.Combine(repo, ".github", "ssearch.idx");
+        string exe = command ?? Environment.ProcessPath ?? "srndx";
+        string index = indexPath ?? Path.Combine(repo, ".github", "srndx.idx");
 
         JsonObject root = File.Exists(path)
             ? JsonNode.Parse(File.ReadAllText(path)) as JsonObject ?? new JsonObject()
@@ -72,14 +72,14 @@ internal static class Installers
         ---
         name: {{skillName}}
         description: >-
-          Offline semantic search over this repository with the ssearch CLI. Use it to find code or
+          Offline semantic search over this repository with the srndx CLI. Use it to find code or
           documentation by meaning (not exact tokens) - for example locating where a concept is
           implemented when you don't know the identifier. Pure managed, no cloud, no GPU.
         ---
 
-        # ssearch - semantic search for this repository
+        # srndx - semantic search for this repository
 
-        `ssearch` is an offline semantic search CLI. It embeds text with a static model and serves
+        `srndx` is an offline semantic search CLI. It embeds text with a static model and serves
         approximate-nearest-neighbour queries from a local index. Reach for it when grep/literal search
         is a poor fit because you are searching by *meaning* rather than an exact string.
 
@@ -87,12 +87,12 @@ internal static class Installers
 
         - "Where is rate limiting handled?" / "find the retry/back-off logic" - conceptual lookups.
         - Exploring an unfamiliar area before reading files.
-        - Complement, not replace, grep: use grep for exact identifiers, ssearch for intent.
+        - Complement, not replace, grep: use grep for exact identifiers, srndx for intent.
 
         ## Build an index
 
         ```sh
-        ssearch index --files . --out .github/ssearch.idx
+        srndx index --files . --out .github/srndx.idx
         ```
 
         Indexing honours `.gitignore`. Re-run after large changes, or use `serve`/`mcp` to keep an index
@@ -101,7 +101,7 @@ internal static class Installers
         ## Search
 
         ```sh
-        ssearch search "how are auth tokens refreshed" --index .github/ssearch.idx --top 5
+        srndx search "how are auth tokens refreshed" --index .github/srndx.idx --top 5
         ```
 
         Options:
@@ -115,9 +115,9 @@ internal static class Installers
 
         ## Keep the index live
 
-        - `ssearch serve --files . --index .github/ssearch.idx` - interactive prompt that re-indexes
+        - `srndx serve --files . --index .github/srndx.idx` - interactive prompt that re-indexes
           changed files as you edit.
-        - `ssearch mcp --files . --index .github/ssearch.idx` - same self-updating index exposed as an MCP
+        - `srndx mcp --files . --index .github/srndx.idx` - same self-updating index exposed as an MCP
           server over stdio with a `search` tool (prefer this when an MCP client is available).
         """;
 }

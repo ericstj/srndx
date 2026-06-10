@@ -1,8 +1,8 @@
 MIT License
 
-Copyright (c) 2026 SemanticSearch contributors
+Copyright (c) 2026 Srndx contributors
 
-This project ("ssearch") is a demo application that composes FastText.Net,
+This project ("srndx") is a demo application that composes FastText.Net,
 Model2Vec.Net and Hnsw.Net through the .NET AI ecosystem abstractions. It builds
 on several open-source components and uses pretrained models that are downloaded
 at build time rather than included here. See THIRD-PARTY-NOTICES.md for details.

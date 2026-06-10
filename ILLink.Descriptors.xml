@@ -3,7 +3,7 @@
     The Microsoft.Extensions.VectorData connector binds the record's CLR properties by reflection at
     runtime. Preserve SearchRecord's members so the mapping survives trimming / NativeAOT.
   -->
-  <assembly fullname="ssearch">
-    <type fullname="SemanticSearch.SearchRecord" preserve="all" />
+  <assembly fullname="srndx">
+    <type fullname="Srndx.SearchRecord" preserve="all" />
   </assembly>
 </linker>

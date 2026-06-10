@@ -1,4 +1,4 @@
-namespace SemanticSearch;
+namespace Srndx;
 
 /// <summary>
 /// A single searchable item. <see cref="Text" /> is the vector source: the store embeds it

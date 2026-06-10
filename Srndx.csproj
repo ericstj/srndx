@@ -6,14 +6,48 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
-    <RootNamespace>SemanticSearch</RootNamespace>
-    <AssemblyName>ssearch</AssemblyName>
+    <RootNamespace>Srndx</RootNamespace>
+    <AssemblyName>srndx</AssemblyName>
     <InvariantGlobalization>true</InvariantGlobalization>
     <PublishAot>true</PublishAot>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <!--
-    ssearch composes three pure-managed, no-native-dependency libraries, consumed as NuGet packages:
+    Packaged as a RID-specific .NET tool (https://learn.microsoft.com/dotnet/core/tools/rid-specific-tools).
+    ToolPackageRuntimeIdentifiers drives the per-RID packages produced by `dotnet pack -r <rid>` without
+    altering normal build/run behavior. The hybrid layout ships native-AOT packages for common RIDs plus an
+    "any" portable CoreCLR fallback (built with -p:PublishAot=false) that the CLI selects when no RID matches.
+  -->
+  <PropertyGroup>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>srndx</ToolCommandName>
+    <ToolPackageRuntimeIdentifiers>win-x64;linux-x64;osx-arm64;any</ToolPackageRuntimeIdentifiers>
+    <PackageId>dotnet-srndx</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>ericstj</Authors>
+    <Description>A fully-managed (no native dependency), AOT-friendly semantic + keyword search CLI for code and text. Combines Model2Vec static embeddings, Hnsw.Net vector search, BM25, and fastText language identification.</Description>
+    <PackageTags>semantic-search;embeddings;hnsw;bm25;fasttext;cli;aot</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/ericstj/srndx</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/ericstj/srndx</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+  </PropertyGroup>
+
+  <!-- The test project lives under tests/ within this project's directory; keep its sources out of the app. -->
+  <ItemGroup>
+    <Compile Remove="tests\**\*.cs" />
+    <None Remove="tests\**\*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+    <InternalsVisibleTo Include="Srndx.Tests" />
+  </ItemGroup>
+
+  <!--
+    srndx composes three pure-managed, no-native-dependency libraries, consumed as NuGet packages:
       * FastText.Net   - language identification (lid.176)
       * Model2Vec.Net  - static text embeddings (Microsoft.Extensions.AI IEmbeddingGenerator)
       * Hnsw.Net       - approximate-nearest-neighbor vector index (Microsoft.Extensions.VectorData)
@@ -34,7 +68,7 @@
   <!--
     Models are downloaded at build time (not committed): the fastText lid.176 language-ID model and
     the Model2Vec potion-base-2M embedding model. Override the install location at runtime with the
-    SEMANTIC_SEARCH_MODELS environment variable.
+    SRNDX_MODELS environment variable.
   -->
   <PropertyGroup>
     <ModelsDir>$(MSBuildProjectDirectory)\models</ModelsDir>
@@ -50,6 +84,14 @@
     <DownloadFile Condition="!Exists('$(PotionModelDir)\config.json')" SourceUrl="$(PotionModelBaseUrl)/config.json" DestinationFolder="$(PotionModelDir)" DestinationFileName="config.json" Retries="2" />
     <Copy SourceFiles="$(ModelsDir)\lid.176.ftz" DestinationFolder="$(OutDir)models" SkipUnchangedFiles="true" />
     <Copy SourceFiles="$(PotionModelDir)\model.safetensors;$(PotionModelDir)\tokenizer.json;$(PotionModelDir)\config.json" DestinationFolder="$(OutDir)models\potion-base-2M" SkipUnchangedFiles="true" />
+  </Target>
+
+  <!-- Bundle the models into the publish output so each RID-specific / "any" tool package is self-contained. -->
+  <Target Name="CopyModelsToPublish" AfterTargets="Publish">
+    <ItemGroup>
+      <_ModelFile Include="$(ModelsDir)\**\*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_ModelFile)" DestinationFiles="@(_ModelFile->'$(PublishDir)models\%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="true" />
   </Target>
 
 </Project>

@@ -1,5 +1,5 @@
 using System.CommandLine;
-using SemanticSearch;
+using Srndx;
 
 var filesOption = new Option<string?>("--files", "-f")
 {
@@ -20,18 +20,26 @@ var outOption = new Option<string>("--out", "-o")
     Required = true,
 };
 
+var efConstructionOption = new Option<int>("--ef-construction")
+{
+    Description = "HNSW build beam width (default 200). Lower values index faster with slightly lower vector recall.",
+    DefaultValueFactory = _ => 200,
+};
+
 var indexCommand = new Command("index", "Build a search index from local files and/or git history.")
 {
     filesOption,
     gitOption,
     maxCommitsOption,
     outOption,
+    efConstructionOption,
 };
 indexCommand.SetAction((parseResult, _) => RunIndexAsync(
     parseResult.GetValue(filesOption),
     parseResult.GetValue(gitOption),
     parseResult.GetValue(maxCommitsOption),
-    parseResult.GetValue(outOption)!));
+    parseResult.GetValue(outOption)!,
+    parseResult.GetValue(efConstructionOption)));
 
 var queryArgument = new Argument<string>("query")
 {
@@ -127,6 +135,18 @@ mcpCommand.SetAction((parseResult, _) => RunMcpAsync(
     parseResult.GetValue(mcpIndexOption)!,
     parseResult.GetValue(mcpDebounceOption)));
 
+var stopIndexOption = new Option<string>("--index", "-i")
+{
+    Description = "Index file whose resident 'serve'/'mcp' process should flush and stop.",
+    Required = true,
+};
+
+var stopCommand = new Command("stop", "Stop a resident 'serve'/'mcp' process holding an index, flushing it first.")
+{
+    stopIndexOption,
+};
+stopCommand.SetAction((parseResult, _) => RunStopAsync(parseResult.GetValue(stopIndexOption)!));
+
 var installRepoOption = new Option<string>("--repo", "-r")
 {
     Description = "Target repository directory.",
@@ -139,19 +159,19 @@ var installMcpPathOption = new Option<string?>("--path")
 var installMcpNameOption = new Option<string>("--name")
 {
     Description = "MCP server name to register.",
-    DefaultValueFactory = _ => "ssearch",
+    DefaultValueFactory = _ => "srndx",
 };
 var installMcpCommandOption = new Option<string?>("--command")
 {
-    Description = "Executable to invoke (default: the current ssearch executable).",
+    Description = "Executable to invoke (default: the current srndx executable).",
 };
 var installMcpIndexOption = new Option<string?>("--index", "-i")
 {
-    Description = "Index file the server should maintain (default: <repo>/.github/ssearch.idx).",
+    Description = "Index file the server should maintain (default: <repo>/.github/srndx.idx).",
 };
 
 var installMcpCommand = new Command("install-mcp",
-    "Register ssearch as an MCP server in a repository so agents can use its live 'search' tool.")
+    "Register srndx as an MCP server in a repository so agents can use its live 'search' tool.")
 {
     installRepoOption,
     installMcpPathOption,
@@ -173,11 +193,11 @@ var installSkillPathOption = new Option<string?>("--path")
 var installSkillNameOption = new Option<string>("--name")
 {
     Description = "Skill name (directory under .github/skills).",
-    DefaultValueFactory = _ => "ssearch",
+    DefaultValueFactory = _ => "srndx",
 };
 
 var installSkillCommand = new Command("install-skill",
-    "Emit an Agent Skill (SKILL.md) that tells an agent how to use the ssearch CLI.")
+    "Emit an Agent Skill (SKILL.md) that tells an agent how to use the srndx CLI.")
 {
     installRepoOption,
     installSkillPathOption,
@@ -189,7 +209,7 @@ installSkillCommand.SetAction((parseResult, _) => Task.FromResult(Installers.Ins
     parseResult.GetValue(installSkillNameOption)!)));
 
 var root = new RootCommand(
-    "ssearch - offline semantic search over local files and git history. " +
+    "srndx - offline semantic search over local files and git history. " +
     "Pure managed: FastText.Net (language ID) + Model2Vec.Net (embeddings) + Hnsw.Net (vector index). " +
     "No native dependency, no GPU, no cloud.")
 {
@@ -197,13 +217,14 @@ var root = new RootCommand(
     searchCommand,
     serveCommand,
     mcpCommand,
+    stopCommand,
     installMcpCommand,
     installSkillCommand,
 };
 
 return await root.Parse(args).InvokeAsync();
 
-static async Task<int> RunIndexAsync(string? filesDir, string? gitRepo, int maxCommits, string outPath)
+static async Task<int> RunIndexAsync(string? filesDir, string? gitRepo, int maxCommits, string outPath, int efConstruction)
 {
     if (filesDir is null && gitRepo is null)
     {
@@ -211,8 +232,14 @@ static async Task<int> RunIndexAsync(string? filesDir, string? gitRepo, int maxC
         return 1;
     }
 
+    if (efConstruction <= 0)
+    {
+        Console.Error.WriteLine("--ef-construction must be positive.");
+        return 1;
+    }
+
     Console.OutputEncoding = System.Text.Encoding.UTF8;
-    using var index = new SearchIndex();
+    using var index = new SearchIndex(efConstruction: efConstruction);
 
     int total = 0;
     if (filesDir is not null)
@@ -244,7 +271,9 @@ static async Task<int> RunIndexAsync(string? filesDir, string? gitRepo, int maxC
 
 static async Task<int> IndexBatchedAsync(SearchIndex index, IEnumerable<Passage> passages)
 {
-    const int batchSize = 256;
+    // Larger batches give the parallel embedder and language detector enough work to amortize their
+    // fan-out, and cut the number of vector-store upsert calls.
+    const int batchSize = 1024;
     int count = 0;
     var batch = new List<Passage>(batchSize);
     foreach (Passage passage in passages)
@@ -273,13 +302,25 @@ static async Task<int> IndexBatchedAsync(SearchIndex index, IEnumerable<Passage>
 
 static async Task<int> RunSearchAsync(string query, string indexPath, string? language, string? source, int top)
 {
+    Console.OutputEncoding = System.Text.Encoding.UTF8;
+    string fullIndexPath = Path.GetFullPath(indexPath);
+
+    // If a serve/mcp process is holding this index resident, proxy the query to it (~ms) instead of
+    // paying the cold-start index load; fall back to loading locally when no live server is reachable.
+    IReadOnlyList<(SearchRecord Record, float Score)>? warm =
+        await WarmQuery.TrySearchAsync(fullIndexPath, query, top, language, source);
+    if (warm is not null)
+    {
+        ConsoleResults.Print(warm);
+        return 0;
+    }
+
     if (!File.Exists(indexPath))
     {
-        Console.Error.WriteLine($"Index file not found: {indexPath}. Build one with 'ssearch index'.");
+        Console.Error.WriteLine($"Index file not found: {indexPath}. Build one with 'srndx index'.");
         return 1;
     }
 
-    Console.OutputEncoding = System.Text.Encoding.UTF8;
     using var index = new SearchIndex();
     index.Load(indexPath);
 
@@ -288,6 +329,20 @@ static async Task<int> RunSearchAsync(string query, string indexPath, string? la
 
     ConsoleResults.Print(results);
     return 0;
+}
+
+static async Task<int> RunStopAsync(string indexPath)
+{
+    string fullIndexPath = Path.GetFullPath(indexPath);
+    bool stopped = await WarmQuery.TryStopAsync(fullIndexPath);
+    if (stopped)
+    {
+        Console.WriteLine($"Stopped the resident server for {indexPath}.");
+        return 0;
+    }
+
+    Console.Error.WriteLine($"No resident server is running for {indexPath}.");
+    return 1;
 }
 
 static async Task<int> RunServeAsync(string filesDir, string indexPath, int debounceMs)
@@ -310,6 +365,12 @@ static async Task<int> RunServeAsync(string filesDir, string indexPath, int debo
     await service.InitializeAsync();
 
     using var cts = new CancellationTokenSource();
+    await using var queryServer = new WarmQueryServer(service, Path.GetFullPath(indexPath), () => service.FlushAsync());
+    queryServer.Start(cts.Token);
+    Console.WriteLine(
+        $"Warm query endpoint ready on 127.0.0.1:{queryServer.Port} - " +
+        $"'srndx search -i {indexPath}' from another shell is served from memory.");
+
     Console.CancelKeyPress += (_, _) =>
     {
         Console.WriteLine("\nShutting down ...");
@@ -346,6 +407,10 @@ static async Task<int> RunMcpAsync(string filesDir, string indexPath, int deboun
     await service.InitializeAsync();
 
     using var cts = new CancellationTokenSource();
+    await using var queryServer = new WarmQueryServer(service, Path.GetFullPath(indexPath), () => service.FlushAsync());
+    queryServer.Start(cts.Token);
+    Console.Error.WriteLine($"Warm query endpoint ready on 127.0.0.1:{queryServer.Port}.");
+
     Console.CancelKeyPress += (_, e) =>
     {
         e.Cancel = true;

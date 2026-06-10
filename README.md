@@ -1,9 +1,9 @@
-# ssearch
+# srndx
 
 **Offline semantic search over your local files and git history.** Ask in plain language,
 get back the passages and commits that mean the same thing — even when they share no keywords.
 
-`ssearch` is a small .NET CLI that composes three pure-managed, **no-native-dependency**
+`srndx` is a small .NET CLI that composes three pure-managed, **no-native-dependency**
 libraries through the standard .NET AI ecosystem abstractions:
 
 | Library | Role | Ecosystem abstraction |
@@ -49,60 +49,86 @@ with the semantic vector index via reciprocal-rank fusion, so both keyword and i
    stays current. It uses the dependency-light `ModelContextProtocol.Core` package (no hosting/DI
    container) and registers the tool through low-level handlers with a hand-authored schema, so it
    stays Native-AOT clean. Index progress is written to stderr to keep the stdout JSON-RPC stream clean.
-5. **`install-mcp`** / **`install-skill`** wire ssearch into a repository for agents: the former merges
-   an `ssearch` entry into `.github/mcp.json` (preserving any existing servers); the latter emits an
+5. **`install-mcp`** / **`install-skill`** wire srndx into a repository for agents: the former merges
+   an `srndx` entry into `.github/mcp.json` (preserving any existing servers); the latter emits an
    Agent Skill at `.github/skills/<name>/SKILL.md` describing how to drive the CLI.
+
+## Install
+
+`srndx` ships as a [RID-specific .NET tool](https://learn.microsoft.com/dotnet/core/tools/rid-specific-tools):
+native-AOT packages for common platforms plus a portable CoreCLR fallback. The CLI picks the best
+match for your machine; the ML models are bundled in the package, so the tool is self-contained.
+
+```sh
+dotnet tool install -g dotnet-srndx
+srndx --help
+```
+
+The platform packages are produced with `dotnet pack -r <rid>` (AOT) and `dotnet pack -r any
+-p:PublishAot=false` (portable fallback); the top-level pointer package is `dotnet pack`. When
+publishing, push the RID-specific packages first and the pointer package last, all at the same
+version.
 
 ## Usage
 
 ```sh
 # Index a docs folder and a repo's recent history into one index file
-ssearch index --files ./docs --git ./my-repo --max-commits 500 --out project.index
+srndx index --files ./docs --git ./my-repo --max-commits 500 --out project.index
 
 # Semantic search
-ssearch search "how do we authenticate requests" --index project.index
+srndx search "how do we authenticate requests" --index project.index
 
 # Filter by source and/or language
-ssearch search "corrige el error de concurrencia" --index project.index --lang es --source git --top 10
+srndx search "corrige el error de concurrencia" --index project.index --lang es --source git --top 10
 
 # Run as a service: watch a directory, keep the index live, and query interactively
-ssearch serve --files ./src --index project.index
+srndx serve --files ./src --index project.index
 #   search> how do we retry failed requests
 #   search> :count
 #   search> :quit
 
 # Run as an MCP server over stdio (live, self-updating index with a 'search' tool)
-ssearch mcp --files ./src --index project.index
+srndx mcp --files ./src --index project.index
 
-# Wire ssearch into a repository for agents
-ssearch install-mcp --repo .      # merge an 'ssearch' server into .github/mcp.json
-ssearch install-skill --repo .    # emit .github/skills/ssearch/SKILL.md
+# Stop a backgrounded serve/mcp process holding an index (flushes it first)
+srndx stop --index project.index
+
+# Wire srndx into a repository for agents
+srndx install-mcp --repo .      # merge an 'srndx' server into .github/mcp.json
+srndx install-skill --repo .    # emit .github/skills/srndx/SKILL.md
 ```
 
-Run `ssearch --help` (or `ssearch <command> --help`) for all options.
+Run `srndx --help` (or `srndx <command> --help`) for all options. While a `serve`/`mcp` process is
+running, a one-shot `srndx search` against the same index is answered by that resident process over a
+loopback socket, skipping the cold-start index load; it falls back to loading the index locally when no
+server is running.
+
+Indexing detects each passage's language and embeds it in parallel across CPU cores; the vector graph
+is built single-threaded. `srndx index --ef-construction <N>` (default 200) trades a little vector
+recall for a faster build — lower values build the HNSW graph more quickly.
 
 ## Benchmarks: hybrid search vs `grep`
 
 How does hybrid (semantic + BM25) search compare to literal search? Measured on
 [`dotnet/extensions`](https://github.com/dotnet/extensions) (3,661 indexed files) with the
-Native-AOT `ssearch` executable, against `git grep` run from the repo root.
+Native-AOT `srndx` executable, against `git grep` run from the repo root.
 
 Building the index is a one-time cost; `git grep` pays its full cost on every query:
 
 | | value |
 | --- | --- |
-| `ssearch index` (one-time) | **16.4 s** — 3,661 files → 20,487 passages |
+| `srndx index` (one-time) | **16.4 s** — 3,661 files → 20,487 passages |
 | index size | 49 MB (vector + BM25) |
 
-Per-query latency: a cold `ssearch search` (start + model load + index load + query) runs **~0.4 s**,
+Per-query latency: a cold `srndx search` (start + model load + index load + query) runs **~0.4 s**,
 ~2× faster than `git grep` over this repo (**~0.85 s**). `grep` re-walks the repo on every query;
-`ssearch` loads a prebuilt index — and the BM25 half is loaded on a second core in parallel with the
+`srndx` loads a prebuilt index — and the BM25 half is loaded on a second core in parallel with the
 vector index, so it adds essentially nothing to cold start. `serve` / `mcp` keep the index warm so
 repeat queries skip the reload entirely.
 
 **Search by intent** — phrases with no shared keywords, where `grep` has nothing literal to match:
 
-| Query (typed as intent) | `ssearch` top hit | `git grep` same phrase |
+| Query (typed as intent) | `srndx` top hit | `git grep` same phrase |
 | --- | --- | --- |
 | validate options at startup | `Diagnostics.Probes.Tests…OptionsValidatorTests` ✓ | 0 hits |
 | circuit breaker half-open state | `Http.Resilience…CustomValidator` ✓ | 0 hits |
@@ -114,7 +140,7 @@ repeat queries skip the reload entirely.
 genuinely relevant file (it used to drift off-topic under pure-semantic search), while `grep` returns
 every literal occurrence for you to scan:
 
-| Identifier | `ssearch` top hit | `git grep` |
+| Identifier | `srndx` top hit | `git grep` |
 | --- | --- | --- |
 | `ValidateOnStart` | `HeaderParsing…ServiceCollectionExtensions` ✓ | 53 lines / 23 files |
 | `Backoff` | `Http.Resilience.Tests…HttpClientBuilderExtensions` ✓ | 6 lines / 6 files |
@@ -127,24 +153,38 @@ What this shows:
 - **Hybrid covers both modes.** BM25 supplies exact-identifier precision; the embeddings supply
   intent; reciprocal-rank fusion merges them, so the same query box answers "where is `ObjectPool`?"
   *and* "where do we pool and reuse objects?".
-- **`grep` is exhaustive and unranked; `ssearch` is focused and ranked.** `grep` on `Redact` returns
-  1,853 lines across 159 files; `ssearch` returns the single most relevant passage. Reach for `grep`
-  when you want every occurrence of a known token, `ssearch` when you want the most relevant few.
+- **`grep` is exhaustive and unranked; `srndx` is focused and ranked.** `grep` on `Redact` returns
+  1,853 lines across 159 files; `srndx` returns the single most relevant passage. Reach for `grep`
+  when you want every occurrence of a known token, `srndx` when you want the most relevant few.
 - **Intent quality is bounded by the embedding model, honestly.** One of the five intent queries
   returned a loosely related top hit (`~`) — expected from the tiny `potion-base-2M` model; swapping a
   larger Model2Vec model trades startup/footprint for better semantic ranking with no code change.
 
 ## Models
 
-The tool needs two model files, resolved from the `models/` folder next to the binary (override
-with the `SEMANTIC_SEARCH_MODELS` environment variable):
+The tool needs two model files. When installed as a packaged tool they are bundled alongside the
+binary; otherwise they are resolved from the `models/` folder next to the binary:
 
 - `lid.176.ftz` — FastText language-identification model.
 - `potion-base-2M/` — Model2Vec embedding model (`config.json`, `model.safetensors`, `tokenizer.json`).
 
+### Bring your own model
+
+Each model can be swapped independently via environment variables (no rebuild required):
+
+| Variable | Points to | Effect |
+| --- | --- | --- |
+| `SRNDX_LANGUAGE_MODEL` | a FastText model **file** | Replaces the language-ID model. |
+| `SRNDX_EMBEDDING_MODEL` | a Model2Vec model **directory** | Replaces the embedding model. |
+| `SRNDX_MODELS` | a **directory** holding both defaults | Replaces both at once. |
+
+Swapping the embedding model changes the vector dimension, so re-run `srndx index` to rebuild any
+index with the new model. A larger Model2Vec model trades startup/footprint for better semantic
+ranking with no code change.
+
 ## Break glass: persistence
 
-The `Microsoft.Extensions.VectorData` abstraction has no save/load API. `ssearch` follows the
+The `Microsoft.Extensions.VectorData` abstraction has no save/load API. `srndx` follows the
 ecosystem convention of *breaking glass* to the concrete provider type: it holds the concrete
 `HnswCollection<TKey, TRecord>` and calls its provider-specific `Save` / `Load`. Everything else —
 embedding, upsert, filtered search — goes through the standard abstractions, so swapping Hnsw.Net
@@ -153,7 +193,7 @@ another embedder is a one-line change.
 
 ## Native AOT
 
-`ssearch` publishes as a self-contained native executable with **no managed JIT and no native ML
+`srndx` publishes as a self-contained native executable with **no managed JIT and no native ML
 dependency**:
 
 ```sh

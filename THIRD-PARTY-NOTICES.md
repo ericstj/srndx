@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-**SemanticSearch** (`ssearch`) is a demo application that composes several open-source
+**Srndx** (`srndx`) is a demo application that composes several open-source
 components. It does not bundle them: libraries are restored as NuGet packages and the
 pretrained models are downloaded at build time. This file acknowledges those components.
 

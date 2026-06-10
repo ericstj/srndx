@@ -3,10 +3,10 @@ using System.Text.Json;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 
-namespace SemanticSearch;
+namespace Srndx;
 
 /// <summary>
-/// Hosts ssearch as a Model Context Protocol server over stdio, exposing a single <c>search</c> tool
+/// Hosts srndx as a Model Context Protocol server over stdio, exposing a single <c>search</c> tool
 /// backed by a live, self-updating index (the watcher in <see cref="IndexService" /> keeps it current).
 /// <para>
 /// The tool is registered through the low-level <see cref="McpServerHandlers" /> request handlers with a
@@ -57,7 +57,7 @@ internal static class McpServerHost
 
         var options = new McpServerOptions
         {
-            ServerInfo = new Implementation { Name = "ssearch", Version = Version },
+            ServerInfo = new Implementation { Name = "srndx", Version = Version },
             ServerInstructions =
                 "Offline semantic search over this repository. Call the 'search' tool with a natural-language " +
                 "query to find the most relevant code or documentation passages.",
@@ -70,7 +70,7 @@ internal static class McpServerHost
             },
         };
 
-        await using var transport = new StdioServerTransport("ssearch", loggerFactory: null);
+        await using var transport = new StdioServerTransport("srndx", loggerFactory: null);
         await using McpServer server = McpServer.Create(transport, options, loggerFactory: null, serviceProvider: null);
         await server.RunAsync(cancellationToken).ConfigureAwait(false);
     }

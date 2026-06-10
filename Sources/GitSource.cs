@@ -1,6 +1,6 @@
 using System.Diagnostics;
 
-namespace SemanticSearch;
+namespace Srndx;
 
 /// <summary>
 /// Reads commit history from a git repository by shelling out to <c>git log</c>. Each commit

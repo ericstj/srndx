@@ -6,7 +6,7 @@ using Model2VecNet;
 using System.Diagnostics.CodeAnalysis;
 using System.Text;
 
-namespace SemanticSearch;
+namespace Srndx;
 
 /// <summary>
 /// The search engine: composes FastText.Net (language ID), Model2Vec.Net (embeddings) and
@@ -25,27 +25,51 @@ public sealed class SearchIndex : IDisposable
 {
     private const string CollectionName = "items";
 
+    /// <summary>Default HNSW build parameters; match the Hnsw.Net defaults.</summary>
+    private const int DefaultEfConstruction = 200;
+    private const int DefaultM = 16;
+
     private readonly FastTextModel _languageModel;
     private readonly Model2VecModel _embedder;
     private readonly HnswVectorStore _store;
     private readonly Bm25Index _lexical = new();
 
-    /// <summary>Container magic for the combined vector + lexical index file ("SSK" v2).</summary>
-    private const uint IndexMagic = 0x53534B32;
+    /// <summary>Container magic for the combined vector + lexical index file ("SSK" v3).</summary>
+    private const uint IndexMagic = 0x53534B33;
 
+    /// <param name="efConstruction">
+    /// HNSW build-time beam width. Higher builds a better-connected graph (higher recall) but is slower;
+    /// lower speeds up indexing. Only affects records added by this instance.
+    /// </param>
+    /// <param name="m">HNSW maximum connections per node. Higher improves recall at the cost of build time and index size.</param>
     [UnconditionalSuppressMessage("Trimming", "IL2026",
         Justification = "The HNSW connector maps SearchRecord by reflection; its members are preserved via ILLink.Descriptors.xml.")]
     [UnconditionalSuppressMessage("AOT", "IL3050",
         Justification = "The HNSW connector maps SearchRecord by reflection; its members are preserved via ILLink.Descriptors.xml.")]
-    public SearchIndex(string? languageModelPath = null, string? embeddingModelPath = null, bool cacheEmbeddings = false)
+    public SearchIndex(
+        string? languageModelPath = null,
+        string? embeddingModelPath = null,
+        bool cacheEmbeddings = false,
+        int efConstruction = DefaultEfConstruction,
+        int m = DefaultM)
     {
         _languageModel = FastTextModel.Load(languageModelPath ?? ModelLocator.LanguageModel);
         _embedder = Model2VecModel.Load(embeddingModelPath ?? ModelLocator.EmbeddingModel);
 
-        IEmbeddingGenerator<string, Embedding<float>> generator =
-            cacheEmbeddings ? new CachingEmbeddingGenerator(_embedder) : _embedder;
+        IEmbeddingGenerator<string, Embedding<float>> generator = new ParallelEmbeddingGenerator(_embedder);
+        if (cacheEmbeddings)
+        {
+            generator = new CachingEmbeddingGenerator(generator);
+        }
 
-        _store = new HnswVectorStore(new HnswVectorStoreOptions { EmbeddingGenerator = generator });
+        var storeOptions = new HnswVectorStoreOptions
+        {
+            EmbeddingGenerator = generator,
+            EfConstruction = efConstruction,
+            M = m,
+        };
+
+        _store = new HnswVectorStore(storeOptions);
         Collection = _store.GetCollection<Guid, SearchRecord>(CollectionName, BuildDefinition(_embedder.Dimension));
         Collection.EnsureCollectionExistsAsync().GetAwaiter().GetResult();
     }
@@ -70,32 +94,45 @@ public sealed class SearchIndex : IDisposable
         return (StripLabel(top.Label), top.Probability);
     }
 
-    /// <summary>Language-detects and indexes a batch of items; the store embeds each one.</summary>
+    /// <summary>Language-detects (in parallel) and indexes a batch of items; the store embeds each one.</summary>
     /// <returns>The keys of the records that were added.</returns>
     public async Task<IReadOnlyList<Guid>> AddAsync(IEnumerable<Passage> passages)
     {
-        var batch = new List<SearchRecord>();
-        foreach (Passage passage in passages)
+        Passage[] items = passages as Passage[] ?? [.. passages];
+        if (items.Length == 0)
         {
-            (string language, _) = DetectLanguage(passage.Text);
+            return [];
+        }
+
+        // FastText prediction uses thread-static scratch state, so detection parallelizes safely across
+        // the batch; the BM25 add and the vector upsert below stay on the calling thread (single-writer).
+        var languages = new string[items.Length];
+        if (items.Length == 1)
+        {
+            languages[0] = DetectLanguage(items[0].Text).Language;
+        }
+        else
+        {
+            Parallel.For(0, items.Length, i => languages[i] = DetectLanguage(items[i].Text).Language);
+        }
+
+        var batch = new List<SearchRecord>(items.Length);
+        for (int i = 0; i < items.Length; i++)
+        {
             var record = new SearchRecord
             {
                 Id = Guid.NewGuid(),
-                Source = passage.Source,
-                Location = passage.Location,
-                Title = passage.Title,
-                Language = language,
-                Text = passage.Text,
+                Source = items[i].Source,
+                Location = items[i].Location,
+                Title = items[i].Title,
+                Language = languages[i],
+                Text = items[i].Text,
             };
             batch.Add(record);
             _lexical.Add(record.Id, $"{record.Title} {record.Text}");
         }
 
-        if (batch.Count > 0)
-        {
-            await Collection.UpsertAsync(batch).ConfigureAwait(false);
-        }
-
+        await Collection.UpsertAsync(batch).ConfigureAwait(false);
         return batch.ConvertAll(r => r.Id);
     }
 
@@ -225,7 +262,7 @@ public sealed class SearchIndex : IDisposable
         {
             if (reader.ReadUInt32() != IndexMagic)
             {
-                throw new InvalidDataException("Unrecognized index format. Rebuild the index with 'ssearch index'.");
+                throw new InvalidDataException("Unrecognized index format. Rebuild the index with 'srndx index'.");
             }
 
             long vectorLength = reader.ReadInt64();
@@ -276,7 +313,7 @@ public sealed class SearchIndex : IDisposable
         {
             if (reader.ReadUInt32() != IndexMagic)
             {
-                throw new InvalidDataException("Unrecognized index format. Rebuild the index with 'ssearch index'.");
+                throw new InvalidDataException("Unrecognized index format. Rebuild the index with 'srndx index'.");
             }
 
             vectorLength = reader.ReadInt64();
@@ -286,13 +323,7 @@ public sealed class SearchIndex : IDisposable
         long lexicalOffset = vectorOffset + vectorLength;
 
         Task vectorTask = Task.Run(() => Collection.Load(path, vectorOffset, SearchSerializerContext.Default));
-        Task lexicalTask = Task.Run(() =>
-        {
-            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-            stream.Seek(lexicalOffset, SeekOrigin.Begin);
-            using var lexReader = new BinaryReader(stream, Encoding.UTF8);
-            _lexical.Load(lexReader, tracking);
-        });
+        Task lexicalTask = Task.Run(() => _lexical.LoadMapped(path, lexicalOffset));
         Task.WaitAll(vectorTask, lexicalTask);
     }
 
