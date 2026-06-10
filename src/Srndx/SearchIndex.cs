@@ -40,14 +40,23 @@ public sealed class SearchIndex : IDisposable
     private readonly int _efConstruction;
     private readonly int _m;
     private readonly int _dimension;
+
+    /// <summary>BM25 over passage body text (title + content): the lexical relevance signal.</summary>
     private readonly Bm25Index _lexical = new();
+
+    /// <summary>
+    /// BM25 over each item's file path and name (or a commit's subject), kept separate so its IDF and
+    /// length normalization rank a short, exact path/name match (e.g. the file that *defines* a type)
+    /// above files that merely mention the term in their body.
+    /// </summary>
+    private readonly Bm25Index _pathIndex = new();
 
     private HnswVectorStore _store = null!;
     private HnswCollection<Guid, SearchRecord>[] _shards = [];
     private int _shardCount;
 
-    /// <summary>Container magic for the combined vector + lexical index file ("SSK" v4, sharded vectors).</summary>
-    private const uint IndexMagic = 0x53534B34;
+    /// <summary>Container magic for the combined index file ("SSK" v5: sharded vectors + body and path BM25).</summary>
+    private const uint IndexMagic = 0x53534B35;
 
     /// <param name="efConstruction">
     /// HNSW build-time beam width. Higher builds a better-connected graph (higher recall) but is slower;
@@ -122,6 +131,24 @@ public sealed class SearchIndex : IDisposable
     /// <summary>Routes a record to a shard by its key; random GUIDs spread evenly across shards.</summary>
     private int ShardOf(Guid id) => (int)((uint)id.GetHashCode() % (uint)_shardCount);
 
+    /// <summary>
+    /// Builds the path/name text fed to the dedicated path index. For files this is the path with its
+    /// separators turned into spaces (so each directory and the file name become terms); for commits it
+    /// is the subject. A short, exact path or name therefore scores highest under BM25 length
+    /// normalization, surfacing the defining file ahead of incidental body mentions.
+    /// </summary>
+    private static string BuildPathText(SearchRecord record)
+    {
+        if (string.Equals(record.Source, "file", StringComparison.Ordinal))
+        {
+            int colon = record.Location.LastIndexOf(':');
+            string path = colon > 0 ? record.Location[..colon] : record.Location;
+            return path.Replace('/', ' ').Replace('.', ' ');
+        }
+
+        return record.Title;
+    }
+
     /// <summary>Detects the dominant language of a piece of text (ISO code and confidence).</summary>
     public (string Language, float Confidence) DetectLanguage(string text)
     {
@@ -179,6 +206,7 @@ public sealed class SearchIndex : IDisposable
             };
             batch[i] = record;
             _lexical.Add(record.Id, $"{record.Title} {record.Text}");
+            _pathIndex.Add(record.Id, BuildPathText(record));
             buckets[ShardOf(record.Id)].Add(record);
         }
 
@@ -206,6 +234,7 @@ public sealed class SearchIndex : IDisposable
         {
             await _shards[ShardOf(id)].DeleteAsync(id).ConfigureAwait(false);
             _lexical.Remove(id);
+            _pathIndex.Remove(id);
         }
     }
 
@@ -285,7 +314,7 @@ public sealed class SearchIndex : IDisposable
             }
         }
 
-        // Lexical candidates from BM25.
+        // Lexical candidates from BM25 over body text.
         IReadOnlyList<(Guid Id, double Score)> lexical = _lexical.Search(query, pool);
         var lexicalScore = new Dictionary<Guid, double>();
         foreach ((Guid id, double score) in lexical)
@@ -293,8 +322,13 @@ public sealed class SearchIndex : IDisposable
             lexicalScore[id] = score;
         }
 
+        // Path/name candidates: a short, exact path or file-name match is the strongest signal for a
+        // "find this type/file" query, so this list is fused with extra weight.
+        IReadOnlyList<(Guid Id, double Score)> path = _pathIndex.Search(query, pool);
+
         // Reciprocal-rank fusion: score by position in each list, not by the (incomparable) raw scores.
         const double k = 60d;
+        const double pathWeight = 2d;
         var fused = new Dictionary<Guid, double>();
         for (int rank = 0; rank < vectorRanked.Count; rank++)
         {
@@ -304,6 +338,11 @@ public sealed class SearchIndex : IDisposable
         for (int rank = 0; rank < lexical.Count; rank++)
         {
             Accumulate(fused, lexical[rank].Id, 1d / (k + rank + 1));
+        }
+
+        for (int rank = 0; rank < path.Count; rank++)
+        {
+            Accumulate(fused, path[rank].Id, pathWeight / (k + rank + 1));
         }
 
         var scored = new List<(SearchRecord Record, double Fused, double Lexical, double Vector)>(fused.Count);
@@ -346,7 +385,7 @@ public sealed class SearchIndex : IDisposable
         return topResults;
     }
 
-    /// <summary>Persists the sharded vector index and the lexical index to a single stream.</summary>
+    /// <summary>Persists the sharded vector index and the body and path lexical indexes to a single stream.</summary>
     public void Save(Stream stream)
     {
         // Serialize the shards in parallel (independent collections), then lay them out as
@@ -359,6 +398,8 @@ public sealed class SearchIndex : IDisposable
             segments[s] = buffer.ToArray();
         });
 
+        byte[] lexicalBytes = SaveBm25(_lexical);
+
         using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
         writer.Write(IndexMagic);
         writer.Write(_shardCount);
@@ -366,6 +407,9 @@ public sealed class SearchIndex : IDisposable
         {
             writer.Write((long)segment.Length);
         }
+
+        // Record the body-lexical section length so the load path can find the path index that follows it.
+        writer.Write((long)lexicalBytes.Length);
         writer.Flush();
 
         foreach (byte[] segment in segments)
@@ -373,7 +417,19 @@ public sealed class SearchIndex : IDisposable
             stream.Write(segment, 0, segment.Length);
         }
 
-        _lexical.Save(writer);
+        stream.Write(lexicalBytes, 0, lexicalBytes.Length);
+        _pathIndex.Save(writer);
+    }
+
+    private static byte[] SaveBm25(Bm25Index index)
+    {
+        using var buffer = new MemoryStream();
+        using (var w = new BinaryWriter(buffer, Encoding.UTF8, leaveOpen: true))
+        {
+            index.Save(w);
+        }
+
+        return buffer.ToArray();
     }
 
     /// <summary>Loads a sharded index previously written by <see cref="Save" />.</summary>
@@ -397,21 +453,25 @@ public sealed class SearchIndex : IDisposable
             segLengths[s] = reader.ReadInt64();
         }
 
+        long lexicalLength = reader.ReadInt64();
+
         var segments = new byte[shardCount][];
         for (int s = 0; s < shardCount; s++)
         {
             segments[s] = reader.ReadBytes((int)segLengths[s]);
         }
 
+        byte[] lexicalBytes = reader.ReadBytes((int)lexicalLength);
+
         using var rest = new MemoryStream();
         stream.CopyTo(rest);
-        byte[] lexicalBytes = rest.ToArray();
+        byte[] pathBytes = rest.ToArray();
 
         ConfigureShards(shardCount);
 
-        // The shards and the lexical index are independent; load them on separate cores so cold start
-        // pays max(slowest shard, lexical) rather than their sum.
-        var tasks = new List<Task>(shardCount + 1);
+        // The shards and the two lexical indexes are independent; load them on separate cores so cold
+        // start pays max(slowest section) rather than their sum.
+        var tasks = new List<Task>(shardCount + 2);
         for (int s = 0; s < shardCount; s++)
         {
             int shard = s;
@@ -422,22 +482,24 @@ public sealed class SearchIndex : IDisposable
             }));
         }
 
-        tasks.Add(Task.Run(() =>
-        {
-            using var lexical = new MemoryStream(lexicalBytes, writable: false);
-            using var lexReader = new BinaryReader(lexical, Encoding.UTF8);
-            _lexical.Load(lexReader, tracking);
-        }));
-
+        tasks.Add(Task.Run(() => LoadBm25(_lexical, lexicalBytes, tracking)));
+        tasks.Add(Task.Run(() => LoadBm25(_pathIndex, pathBytes, tracking)));
         Task.WaitAll([.. tasks]);
     }
 
+    private static void LoadBm25(Bm25Index index, byte[] bytes, bool tracking)
+    {
+        using var ms = new MemoryStream(bytes, writable: false);
+        using var r = new BinaryReader(ms, Encoding.UTF8);
+        index.Load(r, tracking);
+    }
+
     /// <summary>
-    /// Loads an index from a file, memory-mapping each vector shard instead of reading it into memory.
-    /// This is the read-only cold-start path: record payloads and vectors are faulted in on demand, so
-    /// startup cost is independent of index size. The shards and the lexical index are mapped on separate
-    /// cores. When <paramref name="tracking" /> is set the index will be mutated (watch/serve), which a
-    /// memory-mapped index cannot support, so it falls back to a fully-materialized load.
+    /// Loads an index from a file, memory-mapping each vector shard and the two lexical indexes instead
+    /// of reading them into memory. This is the read-only cold-start path: record payloads, vectors, and
+    /// lexical postings are faulted in on demand, so startup cost is independent of index size. When
+    /// <paramref name="tracking" /> is set the index will be mutated (watch/serve), which a memory-mapped
+    /// index cannot support, so it falls back to a fully-materialized load.
     /// </summary>
     public void Load(string path, bool tracking = false)
     {
@@ -452,6 +514,7 @@ public sealed class SearchIndex : IDisposable
 
         int shardCount;
         long[] segLengths;
+        long lexicalLength;
         long headerEnd;
         using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
         using (var reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: true))
@@ -473,6 +536,7 @@ public sealed class SearchIndex : IDisposable
                 segLengths[s] = reader.ReadInt64();
             }
 
+            lexicalLength = reader.ReadInt64();
             headerEnd = stream.Position;
         }
 
@@ -487,8 +551,9 @@ public sealed class SearchIndex : IDisposable
         }
 
         long lexicalOffset = offset;
+        long pathOffset = lexicalOffset + lexicalLength;
 
-        var tasks = new List<Task>(shardCount + 1);
+        var tasks = new List<Task>(shardCount + 2);
         for (int s = 0; s < shardCount; s++)
         {
             int shard = s;
@@ -496,6 +561,7 @@ public sealed class SearchIndex : IDisposable
         }
 
         tasks.Add(Task.Run(() => _lexical.LoadMapped(path, lexicalOffset)));
+        tasks.Add(Task.Run(() => _pathIndex.LoadMapped(path, pathOffset)));
         Task.WaitAll([.. tasks]);
     }
 
@@ -564,6 +630,7 @@ public sealed class SearchIndex : IDisposable
     public void Dispose()
     {
         _lexical.Dispose();
+        _pathIndex.Dispose();
         _store.Dispose();
     }
 }
