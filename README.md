@@ -1,7 +1,8 @@
 # srndx
 
-**Offline semantic search over your local files and git history.** Ask in plain language,
-get back the passages and commits that mean the same thing — even when they share no keywords.
+**Offline semantic + keyword search over your local text — docs, notes, source, and git history.**
+Ask in plain language and get back the passages that mean the same thing, even when they share no
+keywords.
 
 `srndx` is a small .NET CLI that composes three pure-managed, **no-native-dependency** libraries
 through the standard .NET AI ecosystem abstractions:
@@ -85,25 +86,24 @@ loopback socket — skipping the cold-start load — and falls back to loading l
 
 ## Performance
 
-Full methodology and a tool-by-tool comparison (`grep`, `ripgrep`, `git grep`, `tgrep`) are in
-[docs/BENCHMARKS.md](docs/BENCHMARKS.md). The headlines, on `dotnet/runtime`
-(57,923 files → 624,656 passages):
+On `dotnet/runtime` (57,923 files → 624,656 passages) with the Native-AOT build:
 
 | | |
 | --- | --- |
-| Query, **warm** (resident `serve`/`mcp`) | ~38 ms exact identifier · ~80 ms natural-language intent |
+| Query, **warm** (resident `serve`/`mcp`) | ~40–80 ms |
 | Query, **cold** (one-shot `search`) | ~1.1 s (model load + mmap + query) |
 | Index build (one-time) | 624,656 passages in ~2.5 min; amortized over every later query |
 
-Against literal search tools, warm `srndx` matches the fastest indexed grep on exact identifiers **and**
-is the only one that answers natural-language queries at all — `grep`, `ripgrep`, `git grep`, and `tgrep`
-return zero hits on phrases that share no keywords with the code. The greps stay the right tool when you
-want *every* literal occurrence of a known token; `srndx` returns the most relevant few, by keyword or by
-meaning.
-
 Indexing and querying scale with cores: language detection and embedding run in parallel, and the vector
 index is split into independent HNSW shards (`--shards`, default 8) that build, memory-map, and search in
-parallel while preserving recall. See [docs/DESIGN.md](docs/DESIGN.md) for how that works.
+parallel while preserving recall. Cold start is kept roughly independent of index size by memory-mapping
+the shards and the lexical index. Details in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+
+**Scope.** `srndx` finds relevant *passages* by meaning and keyword. It is not a symbol-aware code
+navigator — it won't reliably resolve which `Dictionary` you mean among same-named files, find a type's
+references, or beat a language server at "go to definition." It shines for offline, private, no-dependency
+search over prose and mixed text (docs, notes, tickets, commit messages) and for intent queries with no
+shared keywords. See [Limitations and scope](docs/DESIGN.md#limitations-and-scope) for the honest edges.
 
 ## How it works
 
