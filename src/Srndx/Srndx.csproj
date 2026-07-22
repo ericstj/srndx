@@ -31,6 +31,7 @@
     <PackageTags>semantic-search;embeddings;hnsw;bm25;fasttext;cli;aot</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageIcon>icon.png</PackageIcon>
     <PackageProjectUrl>https://github.com/ericstj/srndx</PackageProjectUrl>
     <RepositoryUrl>https://github.com/ericstj/srndx</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
@@ -39,6 +40,7 @@
   <!-- The test project lives under tests/ at the repo root; nothing to exclude from the app here. -->
   <ItemGroup>
     <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+    <None Include="..\..\eng\icon.png" Pack="true" PackagePath="\" />
     <InternalsVisibleTo Include="Srndx.Tests" />
   </ItemGroup>
 
