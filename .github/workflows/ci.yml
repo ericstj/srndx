@@ -1,8 +1,8 @@
 name: CI
 
-# Private repository. CI builds and tests the solution and the RID-specific tool packages on every
-# push/PR. On a push to main it publishes a rolling prerelease (0.1.0-ci.<run>) to this repository's
-# private GitHub Packages NuGet feed; a v* tag publishes a stable version. It never publishes to NuGet.org.
+# CI builds and tests the solution and the RID-specific tool packages on every push/PR. Pushes to
+# main publish rolling prereleases (0.1.0-ci.<run>) to GitHub Packages. A v* tag publishes a stable
+# version to both GitHub Packages and NuGet.org.
 
 on:
   push:
@@ -145,4 +145,33 @@ jobs:
           dotnet nuget push "artifacts/*.nupkg"
           --source https://nuget.pkg.github.com/ericstj/index.json
           --api-key "${{ secrets.GITHUB_TOKEN }}"
+          --skip-duplicate
+
+  publish-nuget:
+    name: Publish to NuGet.org
+    needs: [pack, pack-pointer]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download package artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          pattern: nupkg-*
+          merge-multiple: true
+
+      - name: NuGet login
+        uses: NuGet/login@v1
+        id: login
+        with:
+          user: ericstj
+
+      - name: Push to NuGet.org
+        run: >
+          dotnet nuget push "artifacts/*.nupkg"
+          --source https://api.nuget.org/v3/index.json
+          --api-key "${{ steps.login.outputs.NUGET_API_KEY }}"
           --skip-duplicate
