@@ -25,12 +25,13 @@
     <ToolPackageRuntimeIdentifiers>win-x64;linux-x64;osx-arm64;any</ToolPackageRuntimeIdentifiers>
     <PackageId>dotnet-srndx</PackageId>
     <!-- CI appends a prerelease suffix (e.g. -ci.<run>) for rolling builds; a v* tag sets a stable Version. -->
-    <VersionPrefix>0.1.0</VersionPrefix>
+    <VersionPrefix>0.1.1</VersionPrefix>
     <Authors>ericstj</Authors>
     <Description>A fully-managed (no native dependency), AOT-friendly semantic + keyword search CLI for code and text. Combines Model2Vec static embeddings, Hnsw.Net vector search, BM25, and fastText language identification.</Description>
     <PackageTags>semantic-search;embeddings;hnsw;bm25;fasttext;cli;aot</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageIcon>icon.png</PackageIcon>
     <PackageProjectUrl>https://github.com/ericstj/srndx</PackageProjectUrl>
     <RepositoryUrl>https://github.com/ericstj/srndx</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
@@ -39,6 +40,7 @@
   <!-- The test project lives under tests/ at the repo root; nothing to exclude from the app here. -->
   <ItemGroup>
     <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+    <None Include="..\..\eng\icon.png" Pack="true" PackagePath="\" />
     <InternalsVisibleTo Include="Srndx.Tests" />
   </ItemGroup>
 
