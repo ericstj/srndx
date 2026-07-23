@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/ericstj/srndx/main/eng/icon.png" alt="srndx logo" width="128" height="128">
+</p>
+
 # srndx
 
 **Offline semantic + keyword search over your local text — docs, notes, source, and git history.**
