@@ -52,7 +52,7 @@
     <PackageReference Include="FastText.Net" Version="0.2.1" />
     <PackageReference Include="Model2Vec.Net" Version="0.1.3" />
     <PackageReference Include="Hnsw.Net" Version="0.1.4" />
-    <PackageReference Include="Microsoft.Extensions.AI.Abstractions" Version="10.8.0" />
+    <PackageReference Include="Microsoft.Extensions.AI.Abstractions" Version="10.8.1" />
     <PackageReference Include="ModelContextProtocol.Core" Version="1.4.1" />
     <PackageReference Include="System.CommandLine" Version="2.0.10" />
   </ItemGroup>
