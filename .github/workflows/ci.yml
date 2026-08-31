@@ -1,8 +1,8 @@
 name: CI
 
 # CI builds and tests the solution and the RID-specific tool packages on every push/PR. Pushes to
-# main publish rolling prereleases (0.1.0-ci.<run>) to GitHub Packages. A v* tag publishes a stable
-# version to both GitHub Packages and NuGet.org.
+# main publish rolling prereleases to GitHub Packages. A v* tag publishes a stable version to both
+# GitHub Packages and NuGet.org.
 
 on:
   push:
@@ -82,6 +82,7 @@ jobs:
         with:
           name: nupkg-${{ matrix.rid }}
           path: artifacts/*.nupkg
+          retention-days: 1
 
   pack-pointer:
     name: Pack pointer package
@@ -117,6 +118,7 @@ jobs:
         with:
           name: nupkg-pointer
           path: artifacts/dotnet-srndx.*.nupkg
+          retention-days: 1
 
   publish:
     name: Publish to GitHub Packages
@@ -146,6 +148,30 @@ jobs:
           --source https://nuget.pkg.github.com/ericstj/index.json
           --api-key "${{ secrets.GITHUB_TOKEN }}"
           --skip-duplicate
+
+  prune-packages:
+    name: Prune ${{ matrix.package }}
+    needs: publish
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - dotnet-srndx
+          - dotnet-srndx.win-x64
+          - dotnet-srndx.any
+          - dotnet-srndx.linux-x64
+          - dotnet-srndx.osx-arm64
+    steps:
+      - uses: actions/delete-package-versions@v5
+        with:
+          package-name: ${{ matrix.package }}
+          package-type: nuget
+          min-versions-to-keep: 1
+          delete-only-pre-release-versions: "true"
 
   publish-nuget:
     name: Publish to NuGet.org
